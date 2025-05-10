@@ -488,7 +488,7 @@ def load_features(layer_dir, model_type, top_n, layer):
     file_path = input_dir / f"{layer}_{top_n}_{model_type}_features.npz"
 
     label_encoder_file = input_dir / f"{model_type}_label_encoder.pkl"
-    label_encoder = torch.load(label_encoder_file)
+    label_encoder = torch.load(label_encoder_file, weights_only=False)
 
     return np.load(file_path, allow_pickle=True), label_encoder
 

@@ -19,21 +19,49 @@ models:
     layers: [5, 12, 19]
     widths: ["16k", "65k"]
 
-  - name: "google/gemma-2-9b"
-    layers: [9, 20, 31]
-    widths: ["16k"]
 
-  - name: "google/gemma-2-9b-it"
-    layers: [9, 20, 31]
-    widths: ["16k"]
-
+        # "AIM-Harvard/reject_prompts",
+        # "jackhhao/jailbreak-classification",
+        # "willcb/massive-intent",
+        # "willcb/massive-scenario",
+        # "legacy-datasets/banking77",
+        # "SetFit/tweet_eval_stance_abortion",
 datasets:
   - name: "Anthropic/election_questions"
     config_name: ""
     split: "test"
     text_field: "question"
     label_field: "label"
-
+  - name: "AIM-Harvard/reject_prompts"
+    config_name: ""
+    split: "train"
+    text_field: "text"
+    label_field: "label"
+  - name: "jackhhao/jailbreak-classification"
+    config_name: ""
+    split: "train"
+    text_field: "prompt"
+    label_field: "type"
+  - name: "willcb/massive-intent"
+    config_name: ""
+    split: "train"
+    text_field: "input"
+    label_field: "label"
+  - name: "willcb/massive-scenario"
+    config_name: ""
+    split: "train"
+    text_field: "input"
+    label_field: "label"
+  - name: "legacy-datasets/banking77"
+    config_name: ""
+    split: "train"
+    text_field: "text"
+    label_field: "label"
+  - name: "SetFit/tweet_eval_stance_abortion"
+    config_name: ""
+    split: "train"
+    text_field: "text"
+    label_field: "label_text"
 
 classification_params:
   top_n_values: [0, 20, 50]

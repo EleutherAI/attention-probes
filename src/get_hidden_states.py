@@ -185,6 +185,7 @@ def get_hidden_states(
                     sae,
                     save_dir=save_dir,
                     activation_only=activation_only,
+                    inputs=inputs,
                 )
                 # After processing the batch clear the memory
                 del hidden_states, inputs

@@ -18,6 +18,7 @@ def retrieve_sae_features(
     sae,
     save_dir="./npz_files",
     activation_only=True,
+    inputs=None,
 ):
     os.makedirs(save_dir, exist_ok=True)
     results = []
@@ -35,8 +36,9 @@ def retrieve_sae_features(
                     # Store the activations as an npz file
                     file_id = f"sample_{sample_id}"
                     npz_file_path = os.path.join(save_dir, f"{file_id}.npz")
+                    input_ids = np.array(inputs[idx_in_batch].ids)
                     np.savez_compressed(
-                        npz_file_path, hidden_state=hidden_state.cpu().numpy()
+                        npz_file_path, hidden_state=hidden_state.cpu().numpy(), input_ids=input_ids
                     )
 
                     # Append metadata for tracking
