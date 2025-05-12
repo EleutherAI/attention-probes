@@ -6,6 +6,10 @@ cache_dir = Path("cache")
 cache = []
 for cache_path in cache_dir.glob("*.pkl"):
     result = joblib.load(cache_path)
+    # for s in result["eval_results"].get("roc_aucs") or []:
+    #     if s == 0.0:
+    #         cache_path.unlink()
+    #         break
     cache.append(result)
 #%%
 import hashlib
@@ -21,10 +25,12 @@ for r in cache:
         print(config_hash, config)
     all_configs.add(config_hash)
 selected_configs = {
-    "489e9a72bb3fdc41dba4ff60c3caae3851e596f995ada8dc7067c290dc903a63":
+    "7d0daf31224a99363a91df7bd4ed113fac0208efe455f5bdd72025e658b0a9fe":
         "attn",
-    "8c6cf85ec0b1f2ae038d2baa3caf4b98ea50bafb7fa5d4389ce7d2e9d6b564a5":
+    "c6f60fab8a5678dfdb04d6f43c5e7291b27e43250e1139b67562a7e9c663b624":
         "mean",
+    "8d5bf89e6590d135fb112d935010ecfd963f60da760d8cd1eacd3d68b52525d1":
+        "last",
 }
 # %%
 from collections import defaultdict
@@ -53,5 +59,5 @@ for data_hash, rs in sorted(all_datas.items()):
     # print([x["data_info"]["sae_size"] for x in rs])
     print(*data_hash)
     for k, v in sorted(for_model.items()):
-        print("", k, max([np.median(r["eval_results"]["accuracies"]) for r in v]))
+        print("", k, max([np.mean(r["eval_results"]["accuracies"]) for r in v]))
 # %%

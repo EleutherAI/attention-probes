@@ -52,11 +52,12 @@ lr = 1e-4
 wd = 0.0
 display_now = False
 # n_heads, last_only, take_mean, nonlinear = 1, False, False, False
-# n_heads, last_only, take_mean, nonlinear = 16, False, False, True
-n_heads, last_only, take_mean, nonlinear = 1, True, True, False
+n_heads, last_only, take_mean, nonlinear = 1, True, False, True
+# n_heads, last_only, take_mean, nonlinear = 1, True, True, True
 batch_size = 256
 device = "cuda:0"
-seed = 4
+seed = 5
+n_folds = 5
 torch.manual_seed(seed)
 device = torch.device(device) if torch.cuda.is_available() else "cpu"
 tokenizer_names = {
@@ -73,6 +74,7 @@ for metadata_path in output_path.glob("**/*.csv"):
         last_only=last_only,
         take_mean=take_mean,
         seed=seed,
+        n_folds=n_folds,
     )
     key_encoded = hashlib.sha256((str(metadata_path) + str(config)).encode()).hexdigest()
     cache_path = cache_dir / f"{key_encoded}.pkl"
@@ -89,6 +91,8 @@ for metadata_path in output_path.glob("**/*.csv"):
     #     continue
     layer_num = int(layer_num)
     sae_size = metadata_path.parents[0].name
+    if sae_size != "16k":
+        continue
     print(f"Processing {model_name} layer {layer_num} {sae_size} with dataset {dataset_path}")
     metadata = pd.read_csv(metadata_path)
     metadata = metadata.drop_duplicates(subset=['npz_file'])
@@ -115,7 +119,7 @@ for metadata_path in output_path.glob("**/*.csv"):
     #     continue
 
     # Create cross-validation splits
-    kf = StratifiedKFold(n_splits=4, shuffle=True, random_state=seed)
+    kf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=seed)
     splits = list(kf.split(y, y))
     
     metrics = defaultdict(list)
@@ -131,11 +135,15 @@ for metadata_path in output_path.glob("**/*.csv"):
         for _ in (bar := trange(train_iterations, desc=f"Training {model_name} {layer_num} {sae_size}")):
             optimizer.zero_grad()
             indices = torch.randint(0, len(train_y), (batch_size,))
-            batch = {k: v[indices] for k, v in train_x.items()}
+            batch = {k: torch.nan_to_num(v[indices], nan=0.0, posinf=0.0, neginf=0.0) for k, v in train_x.items()}
             mask = batch['mask'].float()
             position = batch['position']
+
             if take_mean:
-                batch['x'] = batch['x'] * 0 + batch['x'].sum(-2, keepdim=True) / mask.sum(-1, keepdim=True)[..., None]
+                mask_sum = mask.sum(-1, keepdim=True)[..., None]
+                mask_sum = torch.maximum(mask_sum, torch.ones_like(mask_sum))
+                batch['x'] = batch['x'] * 0 + batch['x'].sum(-2, keepdim=True) / mask_sum
+            batch['x'] = torch.nan_to_num(batch['x'], nan=0.0, posinf=0.0, neginf=0.0)
             if last_only:
                 mask = mask * (position == position.max(axis=-1, keepdims=True).values)
             with torch.autocast(device_type=device.type):
@@ -147,6 +155,9 @@ for metadata_path in output_path.glob("**/*.csv"):
                 loss.backward()
             optimizer.step()
             bar.set_postfix(loss=loss.item())
+        if loss.item() == float("nan"):
+            print("Warning: Loss is NaN")
+            continue
         
         with torch.inference_mode(), torch.autocast(device_type=device.type):
             attns = []
