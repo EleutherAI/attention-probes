@@ -1,0 +1,18 @@
+[project]
+name = "mosaic"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "google-re2>=1.1.20240702",
+    "numba>=0.61.2",
+    "sae-lens",
+    "scikit-learn>=1.6.1",
+    "spacy>=3.8.5",
+    "spacy-alignments>=0.9.1",
+    "sparqlwrapper>=2.0.0",
+]
+
+[tool.uv.sources]
+sae-lens = { git = "https://github.com/jbloomAus/SAELens" }

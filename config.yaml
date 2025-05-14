@@ -7,7 +7,7 @@ settings:
   test_size: 0.4
   tree_depth: 5
   act_only: True
-  cuda_visible_devices: "0,1,2"
+  cuda_visible_devices: "1,6,7"
   bow_baseline: "True"
 
 models:
@@ -62,6 +62,34 @@ datasets:
     split: "train"
     text_field: "text"
     label_field: "label_text"
+# “LabHC/bias_in_bios_class_set1",
+# “LabHC/bias_in_bios_class_set2",
+# “LabHC/bias_in_bios_class_set3",
+# “canrager/amazon_reviews_mcauley_1and5",
+# “canrager/amazon_reviews_mcauley_1and5_sentiment",
+# “codeparrot/github-code",
+# “fancyzhx/ag_news",
+# “Helsinki-NLP/europarl",
+  - name: "LabHC/bias_in_bios"
+    config_name: ""
+    split: "train"
+    text_field: "hard_text"
+    label_field: "gender"
+  - name: "canrager/amazon_reviews_mcauley_1and5"
+    config_name: ""
+    split: "train"
+    text_field: "text"
+    label_field: "rating"
+  - name: "codeparrot/github-code"
+    config_name: ""
+    split: "train"
+    text_field: "code"
+    label_field: "language"
+  - name: "fancyzhx/ag_news"
+    config_name: ""
+    split: "train"
+    text_field: "text"
+    label_field: "label"
 
 classification_params:
   top_n_values: [0, 20, 50]

@@ -160,6 +160,9 @@ def main():
             args.width,
             args.dataset_config_name,
         )
+        if os.path.exists(layer_save_dir):
+            logging.info(f"Skipping layer {layer} because it already exists in {layer_save_dir}")
+            continue
         os.makedirs(layer_save_dir, exist_ok=True)
 
         # Setup logging for this layer

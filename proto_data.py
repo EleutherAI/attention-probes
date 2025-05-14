@@ -17,6 +17,7 @@ class AttentionProbe(nn.Module):
         if hidden_dim:
             self.o = nn.Linear(hidden_dim, output_dim)
         self.attn_hook = nn.Identity()
+
     def forward(self, x, mask, position):
         k = self.q(x) - ((1 - mask.float()) * 1e9)[..., None] + position[..., None] * self.position_weight
         p = torch.nn.functional.softmax(k, dim=-2)
@@ -43,21 +44,41 @@ from sklearn.metrics import roc_auc_score, accuracy_score
 from transformers import AutoTokenizer
 
 
-cache_dir = Path("cache")
+import argparse
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--cache_dir', type=str, default='cache')
+parser.add_argument('--output_path', type=str, default='output')
+parser.add_argument('--train_iterations', type=int, default=2000)
+parser.add_argument('--lr', type=float, default=1e-4)
+parser.add_argument('--wd', type=float, default=0.0)
+parser.add_argument('--display_now', action='store_true')
+parser.add_argument('--n_heads', type=int, default=1)
+parser.add_argument('--last_only', default=False)
+parser.add_argument('--take_mean', default=False)
+parser.add_argument('--nonlinear', default=False)
+parser.add_argument('--batch_size', type=int, default=256)
+parser.add_argument('--device', type=str, default='cuda:0')
+parser.add_argument('--seed', type=int, default=5)
+parser.add_argument('--n_folds', type=int, default=5)
+
+args = parser.parse_args()
+
+cache_dir = Path(args.cache_dir)
 cache_dir.mkdir(exist_ok=True)
-output_path = Path("output")
-train_iterations = 2000
-lr = 1e-4
-# wd = 1e-4
-wd = 0.0
-display_now = False
-# n_heads, last_only, take_mean, nonlinear = 1, False, False, False
-n_heads, last_only, take_mean, nonlinear = 1, True, False, True
-# n_heads, last_only, take_mean, nonlinear = 1, True, True, True
-batch_size = 256
-device = "cuda:0"
-seed = 5
-n_folds = 5
+output_path = Path(args.output_path)
+train_iterations = args.train_iterations
+lr = args.lr
+wd = args.wd
+display_now = args.display_now
+n_heads = args.n_heads
+last_only = args.last_only
+take_mean = args.take_mean or last_only
+nonlinear = args.nonlinear
+batch_size = args.batch_size
+device = args.device
+seed = args.seed
+n_folds = args.n_folds
 torch.manual_seed(seed)
 device = torch.device(device) if torch.cuda.is_available() else "cpu"
 tokenizer_names = {

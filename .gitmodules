@@ -1,0 +1,3 @@
+[submodule "sparse-probing-paper"]
+	path = sparse-probing-paper
+	url = https://github.com/wesg52/sparse-probing-paper
