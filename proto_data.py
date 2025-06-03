@@ -1,33 +1,6 @@
 #%%
-from einops import rearrange
-from torch import nn
-from torch.nn import functional as F
-import torch
+from .attention_probe import AttentionProbe
 
-
-class AttentionProbe(nn.Module):
-    def __init__(self, d_in, n_heads, output_dim: int = 1, hidden_dim: int = 0):
-        super().__init__()
-        self.q = nn.Linear(d_in, n_heads, bias=False)
-        self.v = nn.Linear(d_in, n_heads * (hidden_dim or output_dim))
-        self.n_heads = n_heads
-        self.output_dim = output_dim
-        self.position_weight = nn.Parameter(torch.zeros((n_heads,), dtype=torch.float32))
-        self.hidden_dim = hidden_dim
-        if hidden_dim:
-            self.o = nn.Linear(hidden_dim, output_dim)
-        self.attn_hook = nn.Identity()
-
-    def forward(self, x, mask, position):
-        k = self.q(x) - ((1 - mask.float()) * 1e9)[..., None] + position[..., None] * self.position_weight
-        p = torch.nn.functional.softmax(k, dim=-2)
-        self.attn_hook(p)
-        v = self.v(x).unflatten(-1, (self.n_heads, -1))
-        o = (p[..., None] * v).sum((-2, -3))
-        if self.hidden_dim:
-            o = self.o(o.relu())
-        return o
-#%%
 from pathlib import Path
 import pandas as pd
 from collections import defaultdict, OrderedDict
