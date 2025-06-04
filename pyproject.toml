@@ -6,6 +6,8 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "google-re2>=1.1.20240702",
+    "jax>=0.5.3",
+    "jaxtyping>=0.3.2",
     "joblib>=1.5.0",
     "numba>=0.61.2",
     "sae-lens",
