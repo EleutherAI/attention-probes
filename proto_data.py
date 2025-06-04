@@ -1,10 +1,13 @@
 #%%
-from .attention_probe import AttentionProbe
+from attention_probe import AttentionProbe
 
+from einops import rearrange
+from torch.nn import functional as F
+
+import json
 from pathlib import Path
 import pandas as pd
 from collections import defaultdict, OrderedDict
-from IPython.display import display, HTML
 import torch
 import hashlib
 import joblib
@@ -15,100 +18,129 @@ from sklearn.preprocessing import LabelEncoder
 import numpy as np
 from sklearn.metrics import roc_auc_score, accuracy_score
 from transformers import AutoTokenizer
-
-
 import argparse
+from simple_parsing import Serializable, list_field, parse, field
+from dataclasses import dataclass
 
-parser = argparse.ArgumentParser()
-parser.add_argument('--cache_dir', type=str, default='cache')
-parser.add_argument('--output_path', type=str, default='output')
-parser.add_argument('--train_iterations', type=int, default=2000)
-parser.add_argument('--lr', type=float, default=1e-4)
-parser.add_argument('--wd', type=float, default=0.0)
-parser.add_argument('--display_now', action='store_true')
-parser.add_argument('--n_heads', type=int, default=1)
-parser.add_argument('--last_only', default=False)
-parser.add_argument('--take_mean', default=False)
-parser.add_argument('--nonlinear', default=False)
-parser.add_argument('--batch_size', type=int, default=256)
-parser.add_argument('--device', type=str, default='cuda:0')
-parser.add_argument('--seed', type=int, default=5)
-parser.add_argument('--n_folds', type=int, default=5)
+@dataclass
+class AttentionProbeTrainConfig(Serializable):
+    """
+    Config for training an attention probe.
+    """
+    learning_rate: float = 1e-4
+    weight_decay: float = 0.0
+    train_iterations: int = 2000
+    n_heads: int = 1
+    last_only: bool = False
+    take_mean: bool = False
+    nonlinear: bool = False
+    batch_size: int = 256
+    device: str = "cuda"
+    seed: int = 5
 
-args = parser.parse_args()
+@dataclass
+class MulticlassTrainConfig(AttentionProbeTrainConfig):
+    n_folds: int = 5
 
-cache_dir = Path(args.cache_dir)
-cache_dir.mkdir(exist_ok=True)
-output_path = Path(args.output_path)
-train_iterations = args.train_iterations
-lr = args.lr
-wd = args.wd
-display_now = args.display_now
-n_heads = args.n_heads
-last_only = args.last_only
-take_mean = args.take_mean or last_only
-nonlinear = args.nonlinear
-batch_size = args.batch_size
-device = args.device
-seed = args.seed
-n_folds = args.n_folds
-torch.manual_seed(seed)
-device = torch.device(device) if torch.cuda.is_available() else "cpu"
-tokenizer_names = {
+@dataclass
+class TrainingDataOrigin:
+    metadata_path: Path
+    model_name: str
+    layer_num: int
+    sae_size: str
+    dataset_path: str
+
+@dataclass
+class RunConfig(Serializable):
+    train_config: MulticlassTrainConfig = field(default_factory=MulticlassTrainConfig)
+    datasets: list[str] = list_field("Anthropic/election_questions", "AIM-Harvard/reject_prompts", "jackhhao/jailbreak-classification")
+    models: list[str] = list_field("google-gemma-2b", "google-gemma-2-2b")
+    sae_sizes: list[str] = list_field("16k")
+    cache_source: Path = Path("output")
+    output_path: Path = Path("cache")
+    display_now: bool = False
+    run_set: str = "test"
+
+
+TOKENIZER_NAMES = {
     "google-gemma-2b": "google/gemma-2b",
     "google-gemma-2-2b": "google/gemma-2-2b",
 }
+
+
+if __name__ == "__main__":
+    args = parse(RunConfig)
+    config = args.train_config
+    device = torch.device(config.device) if torch.cuda.is_available() else "cpu"
+    
+    for metadata_path in args.cache_source.glob("**/*.csv"):
+        dataset_path = metadata_path.parents[3].name
+        match = re.match(r"([a-zA-Z0-9\-]+)_([0-9]+)_activations_metadata", metadata_path.stem)
+        if match is None:
+            print("Warning: No match found for", metadata_path)
+            continue
+        model_name, layer_num = match.groups()
+        layer_num = int(layer_num)
+        sae_size = metadata_path.parents[0].name
+        
+        if sae_size not in args.sae_sizes:
+            continue
+        if model_name not in args.models:
+            continue
+        if dataset_path not in args.datasets:
+            continue
+        
+        training_data_origin = TrainingDataOrigin(
+            metadata_path=metadata_path,
+            model_name=model_name,
+            layer_num=layer_num,
+            sae_size=sae_size,
+            dataset_path=dataset_path,
+        )
+        key_encoded = hashlib.sha256(json.dumps(str(metadata_path), config.to_dict()).encode()).hexdigest()
+        save_path = args.output_path / args.run_set / key_encoded
+        if save_path.exists():
+            continue
+        save_path.mkdir(parents=True, exist_ok=True)
+        with open(save_path / "config.json", "w") as f:
+            json.dump(config.to_dict(), f)
+        with open(save_path / "data.json", "w") as f:
+            json.dump(training_data_origin, f)
+        
+        metadata = pd.read_csv(metadata_path)
+        metadata = metadata.drop_duplicates(subset=['npz_file'])
+        cache_data = [np.load(file) for file in metadata['npz_file']]
+        x_data = [npf['hidden_state'] for npf in cache_data]
+        input_ids = [npf['input_ids'] for npf in cache_data]
+        tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_NAMES[model_name])
+        max_seq_len = max([x.shape[0] for x in x_data])
+        x_data = np.array([np.pad(x, ((0, max_seq_len - x.shape[0]), (0, 0)), mode='constant', constant_values=0) for x in x_data])
+        mask_data = np.array([np.pad(np.ones(x.shape[0]), (0, max_seq_len - x.shape[0]), mode='constant', constant_values=0) for x in x_data])
+        position_data = np.array([np.pad(np.arange(x.shape[0]), (0, max_seq_len - x.shape[0]), mode='constant', constant_values=0) for x in x_data])
+        
+        label_encoder = LabelEncoder()
+        y = label_encoder.fit_transform(metadata['label'])
+        multi_class = len(np.unique(y)) > 2
+        
+        kfold = StratifiedKFold(n_splits=config.n_folds, shuffle=True, random_state=config.seed)
+        splits = list(kfold.split(x_data, y))
+        
+        print(metadata_path)
+        exit()
+    exit()
+output_path = Path(args.output_path)
 for metadata_path in output_path.glob("**/*.csv"):
-    config = dict(
-        train_iterations=train_iterations,
-        lr=lr,
-        wd=wd,
-        display_now=display_now,
-        n_heads=n_heads,
-        last_only=last_only,
-        take_mean=take_mean,
-        seed=seed,
-        n_folds=n_folds,
-    )
     key_encoded = hashlib.sha256((str(metadata_path) + str(config)).encode()).hexdigest()
     cache_path = cache_dir / f"{key_encoded}.pkl"
     if cache_path.exists():
         continue
     
-    dataset_path = metadata_path.parents[3].name
-    match = re.match(r"([a-zA-Z0-9\-]+)_([0-9]+)_activations_metadata", metadata_path.stem)
-    if match is None:
-        print("Warning: No match found for", metadata_path)
-        continue
-    model_name, layer_num = match.groups()
     # if "-2-" in model_name:
     #     continue
-    layer_num = int(layer_num)
-    sae_size = metadata_path.parents[0].name
     if sae_size != "16k":
         continue
     print(f"Processing {model_name} layer {layer_num} {sae_size} with dataset {dataset_path}")
-    metadata = pd.read_csv(metadata_path)
-    metadata = metadata.drop_duplicates(subset=['npz_file'])
-    # Read all numpy files into an X array
-    numpys = [np.load(file) for file in metadata['npz_file']]
-    X = [npf['hidden_state'] for npf in numpys]
-    # input_ids = [npf['input_ids'][:len(x)] for npf, x in zip(numpys, X)]
-    input_ids = [npf['input_ids'] for npf, x in zip(numpys, X)]
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_names[model_name])
-    hidden_dim = X[0].shape[-1]
-    max_seq_len = max([x.shape[0] for x in X])
-    # Pad sequences to the same length
-    X = dict(
-        x=np.array([np.pad(x, ((0, max_seq_len - x.shape[0]), (0, 0)), mode='constant', constant_values=0) for x in X]),
-        mask=np.array([np.pad(np.ones(x.shape[0]), (0, max_seq_len - x.shape[0]), mode='constant', constant_values=0) for x in X]),
-        position=np.array([np.pad(np.arange(x.shape[0]), (0, max_seq_len - x.shape[0]), mode='constant', constant_values=0) for x in X]),
-    )
-
     # Turn labels from strings to ints
-    label_encoder = LabelEncoder()
-    y = label_encoder.fit_transform(metadata['label'])
-    multi_class = len(np.unique(y)) > 2
     # if not multi_class:
     #     continue
 
@@ -124,6 +156,7 @@ for metadata_path in output_path.glob("**/*.csv"):
         
         probe = AttentionProbe(hidden_dim, n_heads, hidden_dim=128 if nonlinear else 0, output_dim=1 if not multi_class else len(np.unique(y)))
         probe = probe.to(device, torch.float32)
+        
         optimizer = torch.optim.AdamW(probe.parameters(), lr=lr, weight_decay=wd)
         
         for _ in (bar := trange(train_iterations, desc=f"Training {model_name} {layer_num} {sae_size}")):
@@ -178,6 +211,7 @@ for metadata_path in output_path.glob("**/*.csv"):
                 html.append(f"<span style='color: rgba(1, 0, 0, {a:.2f})'>{tokenizer.decode(token_id)}</span>")
             html = f"<div style='background-color: white; padding: 10px; color: black'>Class: {label} " + "".join(html) + "</div>"
             if display_now:
+                from IPython.display import display, HTML
                 display(HTML(html))
             htmls.append(html)
         
