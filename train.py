@@ -27,7 +27,7 @@ class AttentionProbeTrainConfig(Serializable):
     """
     learning_rate: float = 1e-4
     weight_decay: float = 0.0
-    train_iterations: int = 2000
+    train_iterations: int = 1000
     n_heads: int = 1
     last_only: bool = False
     take_mean: bool = False
@@ -61,6 +61,7 @@ class TrainingData:
     input_ids: Int[Array, "batch_size seq_len"]
     multi_class: bool
     
+    @torch.no_grad()
     def reindex(self, indices: Int[Array, "batch_size"]) -> "TrainingData":
         return TrainingData(
             x=self.x[indices],
@@ -71,11 +72,13 @@ class TrainingData:
             multi_class=self.multi_class,
         )
     
+    @torch.no_grad()
     def split(self, n_folds: int, seed: int) -> list[tuple["TrainingData", "TrainingData"]]:
         kfold = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=seed)
         splits = list(kfold.split(self.x, self.y))
         return [(self.reindex(split[0]), self.reindex(split[1])) for split in splits]
     
+    @torch.no_grad()
     def to_tensor(self, device: torch.device = None) -> "TrainingData":
         return TrainingData(
             x=torch.tensor(self.x, dtype=torch.float32, device=device),
@@ -85,6 +88,24 @@ class TrainingData:
             input_ids=torch.tensor(self.input_ids, dtype=torch.int32, device=device),
             multi_class=self.multi_class,
         )
+    
+    @property
+    def is_tensor(self) -> bool:
+        return isinstance(self.x, torch.Tensor)
+    
+    @torch.no_grad()
+    def process(self, config: MulticlassTrainConfig) -> "TrainingData":
+        if not self.is_tensor:
+            self = self.to_tensor(device="cpu")
+        
+        if config.take_mean:
+            mask_sum = self.mask.sum(-1, keepdim=True)[..., None]
+            mask_sum = torch.maximum(mask_sum, torch.ones_like(mask_sum))
+            self.x = self.x * 0 + (self.x * self.mask[..., None]).sum(-2, keepdim=True) / mask_sum
+        self.x = torch.nan_to_num(self.x, nan=0.0, posinf=0.0, neginf=0.0)
+        if config.last_only:
+            self.mask = self.mask * (self.position == (self.position * self.mask).max(dim=-1, keepdim=True).values)
+        return self
 
 def get_data(training_data_origin: TrainingDataOrigin) -> TrainingData:
     metadata = pd.read_csv(training_data_origin.metadata_path)
@@ -93,9 +114,10 @@ def get_data(training_data_origin: TrainingDataOrigin) -> TrainingData:
     x_data = [npf['hidden_state'] for npf in cache_data]
     input_ids = [npf['input_ids'] for npf in cache_data]
     max_seq_len = max([x.shape[0] for x in x_data])
-    x_data = np.array([np.pad(x, ((0, max_seq_len - x.shape[0]), (0, 0)), mode='constant', constant_values=0) for x in x_data])
+    x_data_padded = np.array([np.pad(x, ((0, max_seq_len - x.shape[0]), (0, 0)), mode='constant', constant_values=0) for x in x_data])
     mask_data = np.array([np.pad(np.ones(x.shape[0]), (0, max_seq_len - x.shape[0]), mode='constant', constant_values=0) for x in x_data])
     position_data = np.array([np.pad(np.arange(x.shape[0]), (0, max_seq_len - x.shape[0]), mode='constant', constant_values=0) for x in x_data])
+    x_data = x_data_padded
     input_ids = np.array([np.pad(np.array(input_id), (0, max_seq_len - len(input_id)), mode='constant', constant_values=0) for input_id in input_ids])
     label_encoder = LabelEncoder()
     y = label_encoder.fit_transform(metadata['label'])
@@ -113,8 +135,8 @@ def get_data(training_data_origin: TrainingDataOrigin) -> TrainingData:
 class RunConfig(Serializable):
     train_config: MulticlassTrainConfig = field(default_factory=MulticlassTrainConfig)
     datasets: list[str] = list_field("Anthropic_election_questions", "AIM-Harvard_reject_prompts", "jackhhao_jailbreak-classification")
-    models: list[str] = list_field("google/gemma-2b", "google/gemma-2-2b")
-    sae_sizes: list[str] = list_field("16k", "65k")
+    models: list[str] = list_field("google/gemma-2-2b")
+    sae_sizes: list[str] = list_field("16k")
     cache_source: Path = Path("output")
     output_path: Path = Path("cache")
     display_now: bool = False
@@ -146,11 +168,15 @@ if __name__ == "__main__":
         sae_size = metadata_path.parents[0].name
         
         if sae_size not in args.sae_sizes:
+            print("Warning: SAE size not matched:", sae_size)
             continue
         if model_name not in args.models:
+            print("Warning: Model not matched:", model_name)
             continue
         if dataset_path not in args.datasets:
+            print("Warning: Dataset not matched:", dataset_path)
             continue
+        print("Training on", model_name, layer_num, sae_size, dataset_path)
         
         training_data_origin = TrainingDataOrigin(
             metadata_path=metadata_path,
@@ -161,8 +187,6 @@ if __name__ == "__main__":
         )
         key_encoded = training_data_origin.id
         save_path = args.output_path / args.run_set / key_encoded
-        if save_path.exists():
-            continue
         save_path.mkdir(parents=True, exist_ok=True)
         with open(save_path / "config.json", "w") as f:
             json.dump(config.to_dict(), f)
@@ -171,6 +195,7 @@ if __name__ == "__main__":
         
         tokenizer = AutoTokenizer.from_pretrained(training_data_origin.model_name)
         training_data = get_data(training_data_origin)
+        training_data = training_data.process(config)
         metrics = defaultdict(list)
         htmls = []
         for train_split, test_split in training_data.split(config.n_folds, config.seed):
