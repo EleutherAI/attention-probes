@@ -1,7 +1,6 @@
 #%%
 from attention_probe import AttentionProbe
 
-from einops import rearrange
 from torch.nn import functional as F
 
 from jaxtyping import Float, Int, Bool, Array
@@ -11,15 +10,13 @@ import pandas as pd
 from collections import defaultdict, OrderedDict
 import torch
 import hashlib
-import joblib
 import re
-from tqdm.auto import tqdm, trange
+from tqdm.auto import trange
 from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import LabelEncoder
 import numpy as np
 from sklearn.metrics import roc_auc_score, accuracy_score
 from transformers import AutoTokenizer
-import argparse
 from simple_parsing import Serializable, list_field, parse, field
 from dataclasses import dataclass
 
@@ -50,6 +47,10 @@ class TrainingDataOrigin(Serializable):
     layer_num: int
     sae_size: str
     dataset_path: str
+    
+    @property
+    def id(self) -> str:
+        return "-".join([self.model_name.replace("/", "-"), str(self.layer_num), self.sae_size, self.dataset_path])
 
 @dataclass
 class TrainingData:
@@ -128,8 +129,10 @@ TOKENIZER_NAMES = {
 
 if __name__ == "__main__":
     args = parse(RunConfig)
+    print(args)
     config = args.train_config
     device = torch.device(config.device)
+    print("Training on", device)
     
     for metadata_path in args.cache_source.glob("**/*.csv"):
         dataset_path = metadata_path.parents[3].name
@@ -156,7 +159,7 @@ if __name__ == "__main__":
             sae_size=sae_size,
             dataset_path=dataset_path,
         )
-        key_encoded = hashlib.sha256(json.dumps((str(metadata_path), config.to_dict())).encode()).hexdigest()
+        key_encoded = training_data_origin.id
         save_path = args.output_path / args.run_set / key_encoded
         if save_path.exists():
             continue
@@ -168,15 +171,18 @@ if __name__ == "__main__":
         
         tokenizer = AutoTokenizer.from_pretrained(training_data_origin.model_name)
         training_data = get_data(training_data_origin)
+        metrics = defaultdict(list)
+        htmls = []
         for train_split, test_split in training_data.split(config.n_folds, config.seed):
             hidden_dim = train_split.x.shape[-1]
             probe = AttentionProbe(hidden_dim, config.n_heads, hidden_dim=config.hidden_dim, output_dim=1 if not train_split.multi_class else len(np.unique(train_split.y)))
             probe = probe.to(device, torch.float32)
             optimizer = torch.optim.AdamW(probe.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
+            train_tensor = train_split.to_tensor(device=device)
             for _ in (bar := trange(config.train_iterations, desc=f"Training {model_name} {layer_num} {sae_size}")):
                 optimizer.zero_grad()
                 indices = torch.randint(0, len(train_split.y), (config.batch_size,), device=device)
-                train_batch = train_split.to_tensor(device=device).reindex(indices)
+                train_batch = train_tensor.reindex(indices)
                 with torch.autocast(device_type=device.type):
                     out = probe(train_batch.x, train_batch.mask, train_batch.position)
                     if not train_split.multi_class:
@@ -186,107 +192,63 @@ if __name__ == "__main__":
                 loss.backward()
                 optimizer.step()
                 bar.set_postfix(loss=loss.item())
-        exit()
-    exit()
-# if 1:   
-#         probe = AttentionProbe(hidden_dim, n_heads, hidden_dim=128 if nonlinear else 0, output_dim=1 if not multi_class else len(np.unique(y)))
-#         probe = probe.to(device, torch.float32)
         
-#         optimizer = torch.optim.AdamW(probe.parameters(), lr=lr, weight_decay=wd)
-        
-#         for _ in (bar := trange(train_iterations, desc=f"Training {model_name} {layer_num} {sae_size}")):
-#             optimizer.zero_grad()
-#             indices = torch.randint(0, len(train_y), (batch_size,))
-#             batch = {k: torch.nan_to_num(v[indices], nan=0.0, posinf=0.0, neginf=0.0) for k, v in train_x.items()}
-#             mask = batch['mask'].float()
-#             position = batch['position']
+            test_data = test_split.to_tensor(device=device)
+            with torch.inference_mode(), torch.autocast(device_type=device.type):
+                attns = []
+                probe.attn_hook.register_forward_hook(lambda _, __, output: attns.append(output.detach().cpu().numpy()))
+                out = probe(test_data.x, test_data.mask, test_data.position)
+                if not test_data.multi_class:
+                    probs = out.sigmoid().detach().cpu().numpy()[..., 0]
+                else:
+                    probs = out.softmax(dim=-1).detach().cpu().numpy()
+                probe.attn_hook._foward_hooks = OrderedDict()
+                attns = np.concatenate(attns)
 
-#             if take_mean:
-#                 mask_sum = mask.sum(-1, keepdim=True)[..., None]
-#                 mask_sum = torch.maximum(mask_sum, torch.ones_like(mask_sum))
-#                 batch['x'] = batch['x'] * 0 + batch['x'].sum(-2, keepdim=True) / mask_sum
-#             batch['x'] = torch.nan_to_num(batch['x'], nan=0.0, posinf=0.0, neginf=0.0)
-#             if last_only:
-#                 mask = mask * (position == position.max(axis=-1, keepdims=True).values)
-#             with torch.autocast(device_type=device.type):
-#                 out = probe(batch['x'], mask, position)
-#                 if not multi_class:
-#                     loss = F.binary_cross_entropy_with_logits(out, train_y[indices].float()[..., None])
-#                 else:
-#                     loss = F.cross_entropy(out, train_y[indices])
-#                 loss.backward()
-#             optimizer.step()
-#             bar.set_postfix(loss=loss.item())
-#         if loss.item() == float("nan"):
-#             print("Warning: Loss is NaN")
-#             continue
+            for i in np.random.randint(0, len(attns), 15):
+                input_id, attn, label = test_data.input_ids[i], attns[i], test_data.y[i]
+                html = []
+                for i, (token_id, a) in enumerate(zip(input_id, attn)):
+                    if token_id == tokenizer.eos_token_id or token_id == tokenizer.pad_token_id:
+                        continue
+                    a = float(a[0])
+                    s, f = 0.2, 0.9
+                    a = min(1, s + f * a)
+                    html.append(f"<span style='color: rgba(1, 0, 0, {a:.2f})'>{tokenizer.decode(token_id)}</span>")
+                html = f"<div style='background-color: white; padding: 10px; color: black'>Class: {label} " + "".join(html) + "</div>"
+                if args.display_now:
+                    from IPython.display import display, HTML
+                    display(HTML(html))
+                htmls.append(html)
         
-#         with torch.inference_mode(), torch.autocast(device_type=device.type):
-#             attns = []
-#             probe.attn_hook.register_forward_hook(lambda _, __, output: attns.append(output.detach().cpu().numpy()))
-#             out = probe(test_x['x'], test_x['mask'], test_x['position'])
-#             if not multi_class:
-#                 probs = out.sigmoid().detach().cpu().numpy()[..., 0]
-#             else:
-#                 probs = out.softmax(dim=-1).detach().cpu().numpy()
-#             probe.attn_hook._foward_hooks = OrderedDict()
-#             attns = np.concatenate(attns)
-        
-
-#         htmls = []
-#         for i in np.random.randint(0, len(attns), 5):
-#             input_id, attn, label = input_ids[test[i]], attns[i], metadata["label"].iloc[test[i]]
-#             html = []
-#             for i, (token_id, a) in enumerate(zip(input_id, attn)):
-#                 if token_id == tokenizer.eos_token_id or token_id == tokenizer.pad_token_id:
-#                     continue
-#                 a = float(a[0])
-#                 s, f = 0.2, 0.9
-#                 a = min(1, s + f * a)
-#                 html.append(f"<span style='color: rgba(1, 0, 0, {a:.2f})'>{tokenizer.decode(token_id)}</span>")
-#             html = f"<div style='background-color: white; padding: 10px; color: black'>Class: {label} " + "".join(html) + "</div>"
-#             if display_now:
-#                 from IPython.display import display, HTML
-#                 display(HTML(html))
-#             htmls.append(html)
-        
-#         if multi_class:
-#             accuracy = accuracy_score(test_y, probs.argmax(axis=-1))
-#         else:
-#             accuracy = accuracy_score(test_y, probs > 0.5)
-#         metrics['accuracy'].append(accuracy)
-#         if not multi_class:
-#             try:
-#                 roc_auc = roc_auc_score(test_y, probs)
-#             except ValueError:
-#                 print("Warning: ROC AUC produced an error")
-#                 roc_auc = 0
-#             print(f"ROC AUC: {roc_auc:.4f}, Accuracy: {accuracy:.4f}")
-#             metrics['roc_auc'].append(roc_auc)
-#         else:
-#             print(f"Accuracy: {accuracy:.4f}")
-#     if not multi_class:
-#         roc_aucs = metrics['roc_auc']
-#         print(f"Mean ROC AUC: {np.mean(roc_aucs):.4f} ± {np.std(roc_aucs):.4f}")
-#     else:
-#         roc_aucs = None
-#     accuracies = metrics['accuracy']
-#     print(f"Mean Accuracy: {np.mean(accuracies):.4f} ± {np.std(accuracies):.4f}")
+            if test_data.multi_class:
+                accuracy = accuracy_score(test_split.y, probs.argmax(axis=-1))
+            else:
+                accuracy = accuracy_score(test_split.y, probs > 0.5)
+            metrics['accuracy'].append(accuracy)
+            if not test_data.multi_class:
+                try:
+                    roc_auc = roc_auc_score(test_split.y, probs)
+                except ValueError:
+                    print("Warning: ROC AUC produced an error")
+                    roc_auc = 0
+                print(f"ROC AUC: {roc_auc:.4f}, Accuracy: {accuracy:.4f}")
+                metrics['roc_auc'].append(roc_auc)
+            else:
+                print(f"Accuracy: {accuracy:.4f}")
+        if not test_data.multi_class:
+            roc_aucs = metrics['roc_auc']
+            print(f"Mean ROC AUC: {np.mean(roc_aucs):.4f} ± {np.std(roc_aucs):.4f}")
+        else:
+            roc_aucs = None
+        accuracies = metrics['accuracy']
+        print(f"Mean Accuracy: {np.mean(accuracies):.4f} ± {np.std(accuracies):.4f}")
     
-#     result = dict(
-#         data_info=dict(
-#             metadata_path=metadata_path,
-#             model_name=model_name,
-#             layer_num=layer_num,
-#             sae_size=sae_size,
-#             dataset_path=dataset_path,
-#         ),
-#         eval_results=dict(
-#             accuracies=accuracies,
-#             roc_aucs=roc_aucs,
-#         ),
-#         htmls=htmls,
-#         config=config
-#     )
-#     joblib.dump(result, cache_path)
-# #%%
+        eval_results = dict(
+            accuracies=accuracies,
+            roc_aucs=roc_aucs,
+        )
+        with open(save_path / "eval_results.json", "w") as f:
+            json.dump(eval_results, f)
+        with open(save_path / "htmls.json", "w") as f:
+            json.dump(htmls, f)
