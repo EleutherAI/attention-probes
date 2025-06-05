@@ -27,7 +27,7 @@ class AttentionProbeTrainConfig(Serializable):
     """
     learning_rate: float = 1e-4
     weight_decay: float = 0.0
-    train_iterations: int = 1000
+    train_iterations: int = 2000
     n_heads: int = 1
     last_only: bool = False
     take_mean: bool = False
