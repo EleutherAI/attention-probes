@@ -14,14 +14,14 @@ from typing import Optional, List, Tuple
 from pandas.api.types import CategoricalDtype
 
 
-from src.results_scripts.extract_utils import extract_scores
-from src.results_scripts.missing_utils import check_missing_combinations
-from src.results_scripts.pooling_utils import plot_pooling_strategies
-from src.results_scripts.scale_utils import plot_sae_across_models_and_widths_by_dataset
-from src.results_scripts.image_utils import (
+from src_mosaic.results_scripts.extract_utils import extract_scores
+from src_mosaic.results_scripts.missing_utils import check_missing_combinations
+from src_mosaic.results_scripts.pooling_utils import plot_pooling_strategies
+from src_mosaic.results_scripts.scale_utils import plot_sae_across_models_and_widths_by_dataset
+from src_mosaic.results_scripts.image_utils import (
     plot_dataset_width_sae,
 )
-from src.results_scripts.action_utils import (
+from src_mosaic.results_scripts.action_utils import (
     plot_action_across_models_and_widths_by_dataset,
 )
 

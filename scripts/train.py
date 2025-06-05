@@ -1,5 +1,5 @@
 #%%
-from attention_probe import AttentionProbe
+from attention_probe.attention_probe import AttentionProbe
 
 from torch.nn import functional as F
 
@@ -80,6 +80,15 @@ class TrainingData:
     
     @torch.no_grad()
     def to_tensor(self, device: torch.device = None) -> "TrainingData":
+        if self.is_tensor:
+            return TrainingData(
+                x=self.x.to(device),
+                mask=self.mask.to(device),
+                position=self.position.to(device),
+                y=self.y.to(device),
+                input_ids=self.input_ids.to(device),
+                multi_class=self.multi_class,
+            )
         return TrainingData(
             x=torch.tensor(self.x, dtype=torch.float32, device=device),
             mask=torch.tensor(self.mask, dtype=torch.bool, device=device),
@@ -131,6 +140,29 @@ def get_data(training_data_origin: TrainingDataOrigin) -> TrainingData:
         multi_class=multi_class,
     )
 
+
+def train_probe(train_split: TrainingData, config: MulticlassTrainConfig, device: torch.device):
+    hidden_dim = train_split.x.shape[-1]
+    probe = AttentionProbe(hidden_dim, config.n_heads, hidden_dim=config.hidden_dim, output_dim=1 if not train_split.multi_class else len(np.unique(train_split.y)))
+    probe = probe.to(device, torch.float32)
+    optimizer = torch.optim.AdamW(probe.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
+    train_tensor = train_split.to_tensor(device=device)
+    with torch.set_grad_enabled(True):
+        for _ in (bar := trange(config.train_iterations, desc=f"Training {model_name} {layer_num} {sae_size}")):
+            optimizer.zero_grad()
+            indices = torch.randint(0, len(train_split.y), (config.batch_size,), device=device)
+            train_batch = train_tensor.reindex(indices)
+            with torch.autocast(device_type=device.type):
+                out = probe(train_batch.x, train_batch.mask, train_batch.position)
+                if not train_split.multi_class:
+                    loss = F.binary_cross_entropy_with_logits(out, train_batch.y.float()[..., None])
+                else:
+                    loss = F.cross_entropy(out, train_batch.y)
+            loss.backward()
+            optimizer.step()
+            bar.set_postfix(loss=loss.item())
+    return probe
+
 @dataclass
 class RunConfig(Serializable):
     train_config: MulticlassTrainConfig = field(default_factory=MulticlassTrainConfig)
@@ -155,6 +187,7 @@ if __name__ == "__main__":
     config = args.train_config
     device = torch.device(config.device)
     print("Training on", device)
+    torch.set_grad_enabled(False)
     
     for metadata_path in args.cache_source.glob("**/*.csv"):
         dataset_path = metadata_path.parents[3].name
@@ -199,24 +232,10 @@ if __name__ == "__main__":
         metrics = defaultdict(list)
         htmls = []
         for train_split, test_split in training_data.split(config.n_folds, config.seed):
-            hidden_dim = train_split.x.shape[-1]
-            probe = AttentionProbe(hidden_dim, config.n_heads, hidden_dim=config.hidden_dim, output_dim=1 if not train_split.multi_class else len(np.unique(train_split.y)))
-            probe = probe.to(device, torch.float32)
-            optimizer = torch.optim.AdamW(probe.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
-            train_tensor = train_split.to_tensor(device=device)
-            for _ in (bar := trange(config.train_iterations, desc=f"Training {model_name} {layer_num} {sae_size}")):
-                optimizer.zero_grad()
-                indices = torch.randint(0, len(train_split.y), (config.batch_size,), device=device)
-                train_batch = train_tensor.reindex(indices)
-                with torch.autocast(device_type=device.type):
-                    out = probe(train_batch.x, train_batch.mask, train_batch.position)
-                    if not train_split.multi_class:
-                        loss = F.binary_cross_entropy_with_logits(out, train_batch.y.float()[..., None])
-                    else:
-                        loss = F.cross_entropy(out, train_batch.y)
-                loss.backward()
-                optimizer.step()
-                bar.set_postfix(loss=loss.item())
+            with torch.set_grad_enabled(True):
+                probe = train_probe(train_split, config, device)
+            probe.eval()
+            probe.requires_grad_(False)
         
             test_data = test_split.to_tensor(device=device)
             with torch.inference_mode(), torch.autocast(device_type=device.type):
