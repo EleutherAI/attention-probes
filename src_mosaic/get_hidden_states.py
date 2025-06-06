@@ -1,7 +1,7 @@
 # get_hidden_states.py -> step1_extract_all.py
 
 import torch
-from datasets import load_dataset
+from datasets import load_dataset, load_from_disk
 from models import load_models_and_tokenizer, prepare_inputs, extract_hidden_states
 from retrieve_sae_features import retrieve_sae_features  # Import the function here
 import logging
@@ -111,7 +111,10 @@ def get_hidden_states(
         # # Concatenate all splits into one dataset
         # dataset = concatenate_datasets(processed_datasets)
     else:
-        dataset = load_dataset(dataset_name, name=dataset_config_name, split=dataset_split)
+        try:
+            dataset = load_dataset(dataset_name, name=dataset_config_name, split=dataset_split)
+        except ValueError:
+            dataset = load_from_disk(dataset_name)
 
     if "id" not in dataset.column_names:
         dataset = dataset.map(lambda example, idx: {"id": idx}, with_indices=True)

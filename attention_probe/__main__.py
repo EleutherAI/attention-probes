@@ -70,6 +70,13 @@ class TrainingData:
             return str(y)
         return self.class_mapping[y]
     
+    @property
+    def device(self) -> torch.device:
+        return self.x.device
+
+    def __len__(self) -> int:
+        return len(self.x)
+    
     @torch.no_grad()
     def reindex(self, indices: Int[Array, "batch_size"]) -> "TrainingData":
         return replace(
@@ -138,7 +145,13 @@ def get_data(training_data_origin: TrainingDataOrigin) -> TrainingData:
     x_data = x_data_padded
     input_ids = np.array([np.pad(np.array(input_id), (0, max_seq_len - len(input_id)), mode='constant', constant_values=0) for input_id in input_ids])
     label_encoder = LabelEncoder()
-    y = label_encoder.fit_transform(metadata['label'])
+    labels = metadata['label'].to_list()
+    max_count = max(l.count("|") for l in labels)
+    if max_count > 1:
+        return None
+    elif max_count == 1:
+        labels = [f'{l.partition("|")[0]}|{l.rpartition(":")[2]}' for l in labels]
+    y = label_encoder.fit_transform(labels)
     multi_class = len(np.unique(y)) > 2
     return TrainingData(
         x=x_data,
@@ -162,12 +175,15 @@ def train_probe_iteration(train_split: TrainingData, config: MulticlassTrainConf
     )
     probe = probe.to(device, torch.float32)
     optimizer = torch.optim.AdamW(probe.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
-    train_tensor = train_split.to_tensor(device=device)
+    if len(train_split) < 5000:
+        train_tensor = train_split.to_tensor(device=device)
+    else:
+        train_tensor = train_split.to_tensor(device="cpu")
     with torch.set_grad_enabled(True):
         for _ in (bar := trange(config.train_iterations, desc=f"Training {model_name} {layer_num} {sae_size}")):
             optimizer.zero_grad()
-            indices = torch.randint(0, len(train_split.y), (config.batch_size,), device=device)
-            train_batch = train_tensor.reindex(indices)
+            indices = torch.randint(0, len(train_split.y), (config.batch_size,), device=train_tensor.device)
+            train_batch = train_tensor.reindex(indices).to_tensor(device=device)
             with torch.autocast(device_type=device.type):
                 out = probe(train_batch.x, train_batch.mask, train_batch.position)
                 if not train_split.multi_class:
@@ -254,6 +270,9 @@ if __name__ == "__main__":
         
         tokenizer = AutoTokenizer.from_pretrained(training_data_origin.model_name)
         training_data = get_data(training_data_origin)
+        if training_data is None:
+            print("Warning: No training data found for", training_data_origin.id)
+            continue
         training_data = training_data.process(config)
         metrics = defaultdict(list)
         htmls = []

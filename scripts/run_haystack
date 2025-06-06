@@ -1,0 +1,2 @@
+#!/bin/bash
+uv run python scripts_mosaic/run_experiments.py --extract-only --config config_haystack.yaml

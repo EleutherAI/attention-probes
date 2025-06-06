@@ -19,10 +19,16 @@ parser.add_argument(
     action="store_true",
     help="Run classification only.",
 )
+parser.add_argument(
+    "--config",
+    type=str,
+    default="config.yaml",
+    help="Config file to use.",
+)
 args = parser.parse_args()
 
 # Load configuration from YAML file
-with open("config.yaml", "r") as f:
+with open(args.config, "r") as f:
     config = yaml.safe_load(f)
 
 settings = config["settings"]

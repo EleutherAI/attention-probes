@@ -8,7 +8,8 @@ import matplotlib.pyplot as plt
 cache_dir = Path("../cache")
 # configs = ["v0", "v0-last"]
 # configs = ["v1", "v1-last", "v1-mean", "v1-tanh"]
-configs = ["v1", "v1-mean"]
+# configs = ["v1", "v1-mean"]
+configs = ["h0", "h0-last"]
 # configs = ["v1", "v1-tanh"]
 # configs = ["v1", "v1-last"]
 results = defaultdict(dict)

@@ -1,5 +1,7 @@
 #%%
 import os
+if "data" not in os.listdir():
+    %cd ..
 import torch
 from tqdm import tqdm
 import numpy as np
@@ -70,10 +72,10 @@ for folder in data_path.glob("*.pyth.*"):
                     start = token_to_spans[pos]
                     end = token_to_spans[pos + 1]
                     class_name.append(f"{start}:{end}:{label}")
-                labels.append("|".join(class_name))
+                label = "|".join(class_name)
+                labels.append(label)
 
         ds = datasets.Dataset.from_dict({"text": texts, "labels": labels})
         ds.save_to_disk(out_dir)
         
 # %%
-fett

@@ -1,0 +1,89 @@
+settings:
+  base_save_dir: "./output_haystack/activations"
+  base_classify_dir: "./output_haystack/classifications"
+  batch_size: 10
+  model_type: "llm"
+  sae_location: "res"
+  test_size: 0.4
+  tree_depth: 5
+  act_only: True
+  cuda_visible_devices: "0"
+  bow_baseline: "True"
+
+models:
+  - name: "google/gemma-2b"
+    layers: [6, 12, 17]
+    widths: ["16k"]
+
+  - name: "google/gemma-2-2b"
+    layers: [5, 12, 19]
+    widths: ["16k"]
+
+datasets:
+  - name: "./data/gurnee_data_processed/compound_words"
+    config_name: ""
+    split: "train"
+    text_field: "text"
+    label_field: "labels"
+  - name: "./data/gurnee_data_processed/wikidata_sorted_sex_or_gender"
+    config_name: ""
+    split: "train"
+    text_field: "text"
+    label_field: "labels"
+  - name: "./data/gurnee_data_processed/text_features"
+    config_name: ""
+    split: "train"
+    text_field: "text"
+    label_field: "labels"
+  - name: "./data/gurnee_data_processed/programming_lang_id"
+    config_name: ""
+    split: "train"
+    text_field: "text"
+    label_field: "labels"
+  - name: "./data/gurnee_data_processed/wikidata_sorted_is_alive"
+    config_name: ""
+    split: "train"
+    text_field: "text"
+    label_field: "labels"
+  - name: "./data/gurnee_data_processed/latex"
+    config_name: ""
+    split: "train"
+    text_field: "text"
+    label_field: "labels"
+  - name: "./data/gurnee_data_processed/distribution_id"
+    config_name: ""
+    split: "train"
+    text_field: "text"
+    label_field: "labels"
+  - name: "./data/gurnee_data_processed/wikidata_sorted_political_party"
+    config_name: ""
+    split: "train"
+    text_field: "text"
+    label_field: "labels"
+  - name: "./data/gurnee_data_processed/wikidata_sorted_occupation_athlete"
+    config_name: ""
+    split: "train"
+    text_field: "text"
+    label_field: "labels"
+  - name: "./data/gurnee_data_processed/natural_lang_id"
+    config_name: ""
+    split: "train"
+    text_field: "text"
+    label_field: "labels"
+  - name: "./data/gurnee_data_processed/wikidata_sorted_occupation"
+    config_name: ""
+    split: "train"
+    text_field: "text"
+    label_field: "labels"
+  - name: "./data/gurnee_data_processed/ewt"
+    config_name: ""
+    split: "train"
+    text_field: "text"
+    label_field: "labels"
+
+classification_params:
+  top_n_values: [0, 20, 50]
+  binarize_values: [null, 1.0]
+  extra_top_n: -1
+  extra_binarize_value: null
+
