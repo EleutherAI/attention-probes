@@ -3,7 +3,7 @@ import torch
 
 
 class AttentionProbe(nn.Module):
-    def __init__(self, d_in, n_heads, output_dim: int = 1, hidden_dim: int = 0):
+    def __init__(self, d_in, n_heads, output_dim: int = 1, hidden_dim: int = 0, use_tanh: bool = False):
         super().__init__()
         # projection from inputs to attention logits
         self.q = nn.Linear(d_in, n_heads, bias=False)
@@ -12,7 +12,7 @@ class AttentionProbe(nn.Module):
 
         self.n_heads = n_heads
         self.output_dim = output_dim
-        
+        self.use_tanh = use_tanh
         # alibi-like relative (to the beginning/end of the sequence) position bias
         self.position_weight = nn.Parameter(torch.zeros((n_heads,), dtype=torch.float32))
         # MLP after the attention
@@ -34,7 +34,10 @@ class AttentionProbe(nn.Module):
         # p: (batch_size, seq_len, n_heads)
         # probability of each element after softmax, with masked elements set to 0
         # dim=-2 is the sequence length dimension
-        p = torch.nn.functional.softmax(k, dim=-2)
+        if self.use_tanh:
+            p = torch.tanh(k)
+        else:
+            p = torch.nn.functional.softmax(k, dim=-2)
         # record attention probabilities if necessary
         self.attn_hook(p)
         # v: (batch_size, seq_len, n_heads, output_dim)

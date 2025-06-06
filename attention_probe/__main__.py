@@ -18,7 +18,7 @@ import numpy as np
 from sklearn.metrics import roc_auc_score, accuracy_score
 from transformers import AutoTokenizer
 from simple_parsing import Serializable, list_field, parse, field
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 @dataclass
 class AttentionProbeTrainConfig(Serializable):
@@ -32,9 +32,12 @@ class AttentionProbeTrainConfig(Serializable):
     last_only: bool = False
     take_mean: bool = False
     hidden_dim: int = 0
+    use_tanh: bool = False
     batch_size: int = 256
     device: str = "cuda"
     seed: int = 5
+    retrain_threshold: float = 0.5
+    retrain_n: int = 5
 
 @dataclass
 class MulticlassTrainConfig(AttentionProbeTrainConfig):
@@ -60,16 +63,22 @@ class TrainingData:
     y: Int[Array, "batch_size"]
     input_ids: Int[Array, "batch_size seq_len"]
     multi_class: bool
+    class_mapping: dict[int, str] | None = None
+    
+    def text_label(self, y: int) -> str:
+        if self.class_mapping is None:
+            return str(y)
+        return self.class_mapping[y]
     
     @torch.no_grad()
     def reindex(self, indices: Int[Array, "batch_size"]) -> "TrainingData":
-        return TrainingData(
+        return replace(
+            self,
             x=self.x[indices],
             mask=self.mask[indices],
             position=self.position[indices],
             y=self.y[indices],
             input_ids=self.input_ids[indices],
-            multi_class=self.multi_class,
         )
     
     @torch.no_grad()
@@ -81,21 +90,21 @@ class TrainingData:
     @torch.no_grad()
     def to_tensor(self, device: torch.device = None) -> "TrainingData":
         if self.is_tensor:
-            return TrainingData(
+            return replace(
+                self,
                 x=self.x.to(device),
                 mask=self.mask.to(device),
                 position=self.position.to(device),
                 y=self.y.to(device),
                 input_ids=self.input_ids.to(device),
-                multi_class=self.multi_class,
             )
-        return TrainingData(
+        return replace(
+            self,
             x=torch.tensor(self.x, dtype=torch.float32, device=device),
             mask=torch.tensor(self.mask, dtype=torch.bool, device=device),
             position=torch.tensor(self.position, dtype=torch.int32, device=device),
             y=torch.tensor(self.y, dtype=torch.int32, device=device),
             input_ids=torch.tensor(self.input_ids, dtype=torch.int32, device=device),
-            multi_class=self.multi_class,
         )
     
     @property
@@ -138,12 +147,19 @@ def get_data(training_data_origin: TrainingDataOrigin) -> TrainingData:
         y=y,
         input_ids=input_ids,
         multi_class=multi_class,
+        class_mapping=label_encoder.classes_,
     )
 
 
-def train_probe(train_split: TrainingData, config: MulticlassTrainConfig, device: torch.device):
+def train_probe_iteration(train_split: TrainingData, config: MulticlassTrainConfig, device: torch.device):
     hidden_dim = train_split.x.shape[-1]
-    probe = AttentionProbe(hidden_dim, config.n_heads, hidden_dim=config.hidden_dim, output_dim=1 if not train_split.multi_class else len(np.unique(train_split.y)))
+    probe = AttentionProbe(
+        hidden_dim,
+        config.n_heads,
+        hidden_dim=config.hidden_dim,
+        output_dim=1 if not train_split.multi_class else len(np.unique(train_split.y)),
+        use_tanh=config.use_tanh,
+    )
     probe = probe.to(device, torch.float32)
     optimizer = torch.optim.AdamW(probe.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
     train_tensor = train_split.to_tensor(device=device)
@@ -157,18 +173,28 @@ def train_probe(train_split: TrainingData, config: MulticlassTrainConfig, device
                 if not train_split.multi_class:
                     loss = F.binary_cross_entropy_with_logits(out, train_batch.y.float()[..., None])
                 else:
-                    loss = F.cross_entropy(out, train_batch.y)
+                    loss = F.cross_entropy(out, train_batch.y.long())
             loss.backward()
             optimizer.step()
             bar.set_postfix(loss=loss.item())
+    return probe, loss.item()
+
+def train_probe(train_split: TrainingData, config: MulticlassTrainConfig, device: torch.device):
+    probe, loss = train_probe_iteration(train_split, config, device)
+    if loss > config.retrain_threshold and config.retrain_n > 0:
+        del probe, loss
+        return train_probe(train_split, replace(config, retrain_n=config.retrain_n - 1, seed=config.seed + 1), device)
     return probe
 
 @dataclass
 class RunConfig(Serializable):
     train_config: MulticlassTrainConfig = field(default_factory=MulticlassTrainConfig)
-    datasets: list[str] = list_field("Anthropic_election_questions", "AIM-Harvard_reject_prompts", "jackhhao_jailbreak-classification")
-    models: list[str] = list_field("google/gemma-2-2b")
-    sae_sizes: list[str] = list_field("16k")
+    # datasets: list[str] = list_field("Anthropic_election_questions", "AIM-Harvard_reject_prompts", "jackhhao_jailbreak-classification")
+    datasets: list[str] = list_field()
+    # models: list[str] = list_field("google/gemma-2-2b")
+    models: list[str] = list_field()
+    # sae_sizes: list[str] = list_field("16k")
+    sae_sizes: list[str] = list_field()
     cache_source: Path = Path("output")
     output_path: Path = Path("cache")
     display_now: bool = False
@@ -200,13 +226,13 @@ if __name__ == "__main__":
         layer_num = int(layer_num)
         sae_size = metadata_path.parents[0].name
         
-        if sae_size not in args.sae_sizes:
+        if args.sae_sizes and sae_size not in args.sae_sizes:
             print("Warning: SAE size not matched:", sae_size)
             continue
-        if model_name not in args.models:
+        if args.models and model_name not in args.models:
             print("Warning: Model not matched:", model_name)
             continue
-        if dataset_path not in args.datasets:
+        if args.datasets and dataset_path not in args.datasets:
             print("Warning: Dataset not matched:", dataset_path)
             continue
         print("Training on", model_name, layer_num, sae_size, dataset_path)
@@ -250,7 +276,7 @@ if __name__ == "__main__":
                 attns = np.concatenate(attns)
 
             for i in np.random.randint(0, len(attns), 15):
-                input_id, attn, label = test_data.input_ids[i], attns[i], test_data.y[i]
+                input_id, attn, label = test_data.input_ids[i], attns[i], test_data.text_label(test_data.y[i])
                 html = []
                 for i, (token_id, a) in enumerate(zip(input_id, attn)):
                     if token_id == tokenizer.eos_token_id or token_id == tokenizer.pad_token_id:

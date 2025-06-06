@@ -55,7 +55,7 @@ def run_extraction(
 
     cmd = [
         "python",
-        "src/step1_extract_all.py",
+        "src_mosaic/step1_extract_all.py",
         "--model-name",
         model_name,
         "--model-type",
@@ -126,7 +126,7 @@ def run_classification(
 
     cmd = [
         "python",
-        "src/step2_dataset_classify.py",
+        "src_mosaic/step2_dataset_classify.py",
         "--input-dir",
         BASE_SAVE_DIR,
         "--dashboard-dir",

@@ -1,7 +1,0 @@
-#!/bin/bash
-
-for SEED in 1 2 3 4 5; do
-    uv run python proto_data.py --seed $SEED
-    uv run python proto_data.py --seed $SEED --last_only --nonlinear
-    uv run python proto_data.py --seed $SEED --take_mean --nonlinear
-done
