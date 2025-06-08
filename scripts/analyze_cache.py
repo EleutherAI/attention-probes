@@ -38,6 +38,8 @@ names = {
     "v1-last": "Last Token Probe",
     "v1-mean": "Mean Probe",
     "v1-tanh": "Tanh Probe",
+    "h0": "Neurons in a Haystack Attention Probe",
+    "h0-last": "Neurons in a Haystack Last Token Probe",
 }
 plt.plot([0, 1], [0, 1], "k--")
 plt.scatter(xs, ys)

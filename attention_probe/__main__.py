@@ -77,6 +77,22 @@ class TrainingData:
     def __len__(self) -> int:
         return len(self.x)
     
+    def numel(self) -> int:
+        return int(self.mask.sum())
+    
+    def numel_base(self) -> int:
+        return self.input_ids.numel()
+    
+    def trim(self) -> "TrainingData":
+        last_position = self.mask.any(dim=0).nonzero().tolist()[-1][-1] + 1
+        return replace(
+            self,
+            x=self.x[:, :last_position],
+            mask=self.mask[:, :last_position],
+            position=self.position[:, :last_position],
+            y=self.y[:, :last_position] if self.y.ndim > 1 else self.y,
+            input_ids=self.input_ids[:, :last_position],
+        )
     @torch.no_grad()
     def reindex(self, indices: Int[Array, "batch_size"]) -> "TrainingData":
         return replace(
@@ -133,17 +149,11 @@ class TrainingData:
         return self
 
 def get_data(training_data_origin: TrainingDataOrigin) -> TrainingData:
-    metadata = pd.read_csv(training_data_origin.metadata_path)
+    try:
+        metadata = pd.read_csv(training_data_origin.metadata_path)
+    except pd.errors.EmptyDataError:
+        return None
     metadata = metadata.drop_duplicates(subset=['npz_file'])
-    cache_data = [np.load(file) for file in metadata['npz_file']]
-    x_data = [npf['hidden_state'] for npf in cache_data]
-    input_ids = [npf['input_ids'] for npf in cache_data]
-    max_seq_len = max([x.shape[0] for x in x_data])
-    x_data_padded = np.array([np.pad(x, ((0, max_seq_len - x.shape[0]), (0, 0)), mode='constant', constant_values=0) for x in x_data])
-    mask_data = np.array([np.pad(np.ones(x.shape[0]), (0, max_seq_len - x.shape[0]), mode='constant', constant_values=0) for x in x_data])
-    position_data = np.array([np.pad(np.arange(x.shape[0]), (0, max_seq_len - x.shape[0]), mode='constant', constant_values=0) for x in x_data])
-    x_data = x_data_padded
-    input_ids = np.array([np.pad(np.array(input_id), (0, max_seq_len - len(input_id)), mode='constant', constant_values=0) for input_id in input_ids])
     label_encoder = LabelEncoder()
     labels = metadata['label'].to_list()
     max_count = max(l.count("|") for l in labels)
@@ -153,6 +163,17 @@ def get_data(training_data_origin: TrainingDataOrigin) -> TrainingData:
         labels = [f'{l.partition("|")[0]}|{l.rpartition(":")[2]}' for l in labels]
     y = label_encoder.fit_transform(labels)
     multi_class = len(np.unique(y)) > 2
+    
+    cache_data = [np.load(file) for file in metadata['npz_file']]
+    x_data = [npf['hidden_state'] for npf in cache_data]
+    input_ids = [npf['input_ids'] for npf in cache_data]
+    max_seq_len = max([x.shape[0] for x in x_data])
+    x_data_padded = np.array([np.pad(x, ((0, max_seq_len - x.shape[0]), (0, 0)), mode='constant', constant_values=0) for x in x_data])
+    mask_data = np.array([np.pad(np.ones(x.shape[0]), (0, max_seq_len - x.shape[0]), mode='constant', constant_values=0) for x in x_data])
+    position_data = np.array([np.pad(np.arange(x.shape[0]), (0, max_seq_len - x.shape[0]), mode='constant', constant_values=0) for x in x_data])
+    input_ids = np.array([np.pad(np.array(input_id), (0, max_seq_len - len(input_id)), mode='constant', constant_values=0) for input_id in input_ids])
+    x_data = x_data_padded
+    
     return TrainingData(
         x=x_data,
         mask=mask_data,
@@ -165,6 +186,7 @@ def get_data(training_data_origin: TrainingDataOrigin) -> TrainingData:
 
 
 def train_probe_iteration(train_split: TrainingData, config: MulticlassTrainConfig, device: torch.device):
+    train_split = train_split.trim()
     hidden_dim = train_split.x.shape[-1]
     probe = AttentionProbe(
         hidden_dim,
@@ -175,7 +197,7 @@ def train_probe_iteration(train_split: TrainingData, config: MulticlassTrainConf
     )
     probe = probe.to(device, torch.float32)
     optimizer = torch.optim.AdamW(probe.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
-    if len(train_split) < 5000:
+    if train_split.numel_base() < 100_000:
         train_tensor = train_split.to_tensor(device=device)
     else:
         train_tensor = train_split.to_tensor(device="cpu")
@@ -183,7 +205,7 @@ def train_probe_iteration(train_split: TrainingData, config: MulticlassTrainConf
         for _ in (bar := trange(config.train_iterations, desc=f"Training {model_name} {layer_num} {sae_size}")):
             optimizer.zero_grad()
             indices = torch.randint(0, len(train_split.y), (config.batch_size,), device=train_tensor.device)
-            train_batch = train_tensor.reindex(indices).to_tensor(device=device)
+            train_batch = train_tensor.reindex(indices).trim().to_tensor(device=device)
             with torch.autocast(device_type=device.type):
                 out = probe(train_batch.x, train_batch.mask, train_batch.position)
                 if not train_split.multi_class:
