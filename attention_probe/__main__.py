@@ -1,6 +1,6 @@
 #%%
-from attention_probe.attention_probe import AttentionProbe
-
+from .attention_probe import AttentionProbe
+from .linear_classifier import Classifier as LinearClassifier
 from torch.nn import functional as F
 
 from jaxtyping import Float, Int, Bool, Array
@@ -29,11 +29,12 @@ class AttentionProbeTrainConfig(Serializable):
     weight_decay: float = 0.0
     train_iterations: int = 2000
     n_heads: int = 1
+    use_linear_classifier: bool = False
     last_only: bool = False
     take_mean: bool = False
     hidden_dim: int = 0
     use_tanh: bool = False
-    batch_size: int = 256
+    batch_size: int = 2048
     device: str = "cuda"
     seed: int = 5
     retrain_threshold: float = 0.5
@@ -95,6 +96,10 @@ class TrainingData:
         )
     @torch.no_grad()
     def reindex(self, indices: Int[Array, "batch_size"]) -> "TrainingData":
+        assert indices.ndim == 1
+        assert int(max(indices)) < len(self)
+        if self.is_tensor and isinstance(indices, np.ndarray):
+            indices = torch.from_numpy(indices).to(self.device)
         return replace(
             self,
             x=self.x[indices],
@@ -107,7 +112,7 @@ class TrainingData:
     @torch.no_grad()
     def split(self, n_folds: int, seed: int) -> list[tuple["TrainingData", "TrainingData"]]:
         kfold = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=seed)
-        splits = list(kfold.split(self.x, self.y))
+        splits = list(kfold.split(self.y, self.y))
         return [(self.reindex(split[0]), self.reindex(split[1])) for split in splits]
     
     @torch.no_grad()
@@ -156,7 +161,7 @@ def get_data(training_data_origin: TrainingDataOrigin) -> TrainingData:
     metadata = metadata.drop_duplicates(subset=['npz_file'])
     label_encoder = LabelEncoder()
     labels = metadata['label'].to_list()
-    max_count = max(l.count("|") for l in labels)
+    max_count = max((l.count("|") if isinstance(l, str) else 0) for l in labels)
     if max_count > 1:
         return None
     elif max_count == 1:
@@ -185,16 +190,19 @@ def get_data(training_data_origin: TrainingDataOrigin) -> TrainingData:
     )
 
 
-def train_probe_iteration(train_split: TrainingData, config: MulticlassTrainConfig, device: torch.device):
-    train_split = train_split.trim()
-    hidden_dim = train_split.x.shape[-1]
-    probe = AttentionProbe(
-        hidden_dim,
+def attention_probe_from_config(config: MulticlassTrainConfig, train_split: TrainingData) -> AttentionProbe:
+    return AttentionProbe(
+        train_split.x.shape[-1],
         config.n_heads,
         hidden_dim=config.hidden_dim,
-        output_dim=1 if not train_split.multi_class else len(np.unique(train_split.y)),
+        output_dim=1 if not train_split.multi_class else len(torch.unique(train_split.y)),
         use_tanh=config.use_tanh,
     )
+
+
+def train_probe_iteration(train_split: TrainingData, config: MulticlassTrainConfig, device: torch.device):
+    train_split = train_split.trim()
+    probe = attention_probe_from_config(config, train_split)
     probe = probe.to(device, torch.float32)
     optimizer = torch.optim.AdamW(probe.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
     if train_split.numel_base() < 100_000:
@@ -218,6 +226,18 @@ def train_probe_iteration(train_split: TrainingData, config: MulticlassTrainConf
     return probe, loss.item()
 
 def train_probe(train_split: TrainingData, config: MulticlassTrainConfig, device: torch.device):
+    if config.use_linear_classifier:
+        assert config.last_only or config.take_mean
+        probe = LinearClassifier(train_split.x.shape[-1], num_classes=len(torch.unique(train_split.y)), device=device)
+        batch = train_split.to_tensor(device=device)
+        x = (batch.x * batch.mask[..., None]).sum(-2, keepdim=True)
+        y = batch.y.long()
+        probe.fit_cv(x, y)
+        att_probe = attention_probe_from_config(config, train_split).to(device)
+        att_probe.v.weight.data[:] = probe.linear.weight.data
+        att_probe.v.bias.data[:] = probe.linear.bias.data
+        return att_probe
+    
     probe, loss = train_probe_iteration(train_split, config, device)
     if loss > config.retrain_threshold and config.retrain_n > 0:
         del probe, loss
@@ -237,6 +257,9 @@ class RunConfig(Serializable):
     output_path: Path = Path("cache")
     display_now: bool = False
     run_set: str = "test"
+    skip_existing: bool = True
+    # Reduce dataset size to batch size
+    downsample: bool = False
 
 
 TOKENIZER_NAMES = {
@@ -289,16 +312,25 @@ if __name__ == "__main__":
             json.dump(config.to_dict(), f)
         with open(save_path / "data.json", "w") as f:
             json.dump(training_data_origin.to_dict(), f)
-        
+        if args.skip_existing and (save_path / "eval_results.json").exists():
+            print("Skipping existing run")
+            continue
+
         tokenizer = AutoTokenizer.from_pretrained(training_data_origin.model_name)
         training_data = get_data(training_data_origin)
+        config = replace(config, batch_size=min(config.batch_size, len(training_data)))
+        if args.downsample:
+            generator = np.random.default_rng(config.seed)
+            training_data = training_data.reindex(generator.permutation(len(training_data))[:config.batch_size])
         if training_data is None:
             print("Warning: No training data found for", training_data_origin.id)
             continue
         training_data = training_data.process(config)
         metrics = defaultdict(list)
         htmls = []
+        print(f"Starting training (size: {len(training_data)}/{training_data.numel_base()})")
         for train_split, test_split in training_data.split(config.n_folds, config.seed):
+            print("Training", flush=True)
             with torch.set_grad_enabled(True):
                 probe = train_probe(train_split, config, device)
             probe.eval()
@@ -316,6 +348,7 @@ if __name__ == "__main__":
                 probe.attn_hook._foward_hooks = OrderedDict()
                 attns = np.concatenate(attns)
 
+            print("Evaluating")
             for i in np.random.randint(0, len(attns), 15):
                 input_id, attn, label = test_data.input_ids[i], attns[i], test_data.text_label(test_data.y[i])
                 html = []

@@ -9,14 +9,15 @@ cache_dir = Path("../cache")
 # configs = ["v0", "v0-last"]
 # configs = ["v1", "v1-last", "v1-mean", "v1-tanh"]
 # configs = ["v1", "v1-mean"]
-configs = ["h0", "h0-last"]
+# configs = ["h0", "h0-last"]
 # configs = ["v1", "v1-tanh"]
 # configs = ["v1", "v1-last"]
+configs = ["v1", "v1-lin-last"]
 results = defaultdict(dict)
 for config in configs:
     for run in (cache_dir / config).glob("*"):
         try:
-            results[run.stem][config] = np.mean(json.load(open(run / "eval_results.json"))["accuracies"])
+            results[run.name][config] = np.mean(json.load(open(run / "eval_results.json"))["accuracies"])
         except FileNotFoundError:
             pass
 xs = []
@@ -36,6 +37,7 @@ for setup, config_results in results.items():
 names = {
     "v1": "Attention Probe",
     "v1-last": "Last Token Probe",
+    "v1-lin-last": "Linear Classifier (Last Token)",
     "v1-mean": "Mean Probe",
     "v1-tanh": "Tanh Probe",
     "h0": "Neurons in a Haystack Attention Probe",
@@ -59,8 +61,8 @@ for run in (cache_dir / html_config).glob("*"):
     html_path = run / "htmls.json"
     if not html_path.exists():
         continue
-    htmls = json.load(open(html_path))
-    for html in htmls:
-        display(HTML(html))
+    # htmls = json.load(open(html_path))
+    # for html in htmls:
+    #     display(HTML(html))
     break
 # %%
