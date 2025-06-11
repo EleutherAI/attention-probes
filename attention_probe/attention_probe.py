@@ -1,9 +1,9 @@
 from torch import nn
 import torch
-
+from typing import Any
 
 class AttentionProbe(nn.Module):
-    def __init__(self, d_in, n_heads, output_dim: int = 1, hidden_dim: int = 0, use_tanh: bool = False):
+    def __init__(self, d_in, n_heads, output_dim: int = 1, hidden_dim: int = 0, use_tanh: bool = False, config: Any = None):
         super().__init__()
         # projection from inputs to attention logits
         self.q = nn.Linear(d_in, n_heads, bias=False)
@@ -21,6 +21,8 @@ class AttentionProbe(nn.Module):
             self.o = nn.Linear(hidden_dim, output_dim)
         # hookpoint to record attention probabilities. use register_forward_hook to record
         self.attn_hook = nn.Identity()
+        
+        self.config = config
 
     def forward(self, x, mask, position):
         # x: (batch_size, seq_len, d_in)

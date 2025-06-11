@@ -19,6 +19,7 @@ from sklearn.metrics import roc_auc_score, accuracy_score
 from transformers import AutoTokenizer
 from simple_parsing import Serializable, list_field, parse, field
 from dataclasses import dataclass, replace
+from copy import copy
 
 @dataclass
 class AttentionProbeTrainConfig(Serializable):
@@ -63,8 +64,12 @@ class TrainingData:
     position: Int[Array, "batch_size seq_len"]
     y: Int[Array, "batch_size"]
     input_ids: Int[Array, "batch_size seq_len"]
-    multi_class: bool
+    n_classes: int
     class_mapping: dict[int, str] | None = None
+    
+    @property
+    def multi_class(self) -> bool:
+        return self.n_classes > 2
     
     def text_label(self, y: int) -> str:
         if self.class_mapping is None:
@@ -144,21 +149,27 @@ class TrainingData:
         if not self.is_tensor:
             self = self.to_tensor(device="cpu")
         
-        if config.take_mean:
-            mask_sum = self.mask.sum(-1, keepdim=True)[..., None]
-            mask_sum = torch.maximum(mask_sum, torch.ones_like(mask_sum))
-            self.x = self.x * 0 + (self.x * self.mask[..., None]).sum(-2, keepdim=True) / mask_sum
-        self.x = torch.nan_to_num(self.x, nan=0.0, posinf=0.0, neginf=0.0)
         if config.last_only:
             self.mask = self.mask * (self.position == (self.position * self.mask).max(dim=-1, keepdim=True).values)
+        if config.take_mean or config.last_only:
+            mask_sum = self.mask.sum(-1, keepdim=True)[..., None]
+            mask_sum = torch.maximum(mask_sum, torch.ones_like(mask_sum))
+            self.x = (self.x * self.mask[..., None]).sum(-2, keepdim=True) / mask_sum
+            self.mask = torch.ones_like(self.x[..., 0])
+        self.x = torch.nan_to_num(self.x, nan=0.0, posinf=0.0, neginf=0.0)
         return self
 
-def get_data(training_data_origin: TrainingDataOrigin) -> TrainingData:
+def get_data(training_data_origin: TrainingDataOrigin, limit: int | None = None, seed: int | None = None) -> TrainingData:
     try:
         metadata = pd.read_csv(training_data_origin.metadata_path)
     except pd.errors.EmptyDataError:
         return None
+    if "npz_file" not in metadata.columns:
+        return None
     metadata = metadata.drop_duplicates(subset=['npz_file'])
+    if limit is not None:
+        metadata = metadata.sample(n=min(limit, len(metadata)), random_state=seed)
+        
     label_encoder = LabelEncoder()
     labels = metadata['label'].to_list()
     max_count = max((l.count("|") if isinstance(l, str) else 0) for l in labels)
@@ -167,7 +178,6 @@ def get_data(training_data_origin: TrainingDataOrigin) -> TrainingData:
     elif max_count == 1:
         labels = [f'{l.partition("|")[0]}|{l.rpartition(":")[2]}' for l in labels]
     y = label_encoder.fit_transform(labels)
-    multi_class = len(np.unique(y)) > 2
     
     cache_data = [np.load(file) for file in metadata['npz_file']]
     x_data = [npf['hidden_state'] for npf in cache_data]
@@ -185,7 +195,7 @@ def get_data(training_data_origin: TrainingDataOrigin) -> TrainingData:
         position=position_data,
         y=y,
         input_ids=input_ids,
-        multi_class=multi_class,
+        n_classes=len(np.unique(y)),
         class_mapping=label_encoder.classes_,
     )
 
@@ -195,8 +205,9 @@ def attention_probe_from_config(config: MulticlassTrainConfig, train_split: Trai
         train_split.x.shape[-1],
         config.n_heads,
         hidden_dim=config.hidden_dim,
-        output_dim=1 if not train_split.multi_class else len(torch.unique(train_split.y)),
+        output_dim=1 if not train_split.multi_class else train_split.n_classes,
         use_tanh=config.use_tanh,
+        config=config,
     )
 
 
@@ -228,9 +239,12 @@ def train_probe_iteration(train_split: TrainingData, config: MulticlassTrainConf
 def train_probe(train_split: TrainingData, config: MulticlassTrainConfig, device: torch.device):
     if config.use_linear_classifier:
         assert config.last_only or config.take_mean
-        probe = LinearClassifier(train_split.x.shape[-1], num_classes=len(torch.unique(train_split.y)), device=device)
+        n_classes = train_split.n_classes
+        if n_classes == 2:
+            n_classes = 1
+        probe = LinearClassifier(train_split.x.shape[-1], num_classes=n_classes, device=device)
         batch = train_split.to_tensor(device=device)
-        x = (batch.x * batch.mask[..., None]).sum(-2, keepdim=True)
+        x = (batch.x * batch.mask[..., None]).sum(-2)
         y = batch.y.long()
         probe.fit_cv(x, y)
         att_probe = attention_probe_from_config(config, train_split).to(device)
@@ -271,12 +285,16 @@ TOKENIZER_NAMES = {
 if __name__ == "__main__":
     args = parse(RunConfig)
     print(args)
-    config = args.train_config
-    device = torch.device(config.device)
+    config_base = args.train_config
+    device = torch.device(config_base.device)
     print("Training on", device)
     torch.set_grad_enabled(False)
     
+    n_failures, n_attempts = 0, 0
+    
     for metadata_path in args.cache_source.glob("**/*.csv"):
+        config = copy(config_base)
+        
         dataset_path = metadata_path.parents[3].name
         match = re.match(r"([a-zA-Z0-9\-]+)_([0-9]+)_activations_metadata", metadata_path.stem)
         if match is None:
@@ -317,22 +335,33 @@ if __name__ == "__main__":
             continue
 
         tokenizer = AutoTokenizer.from_pretrained(training_data_origin.model_name)
-        training_data = get_data(training_data_origin)
+        training_data = get_data(training_data_origin, limit=config.batch_size if args.downsample else None, seed=config.seed)
+        if training_data is None:
+            print("Warning: No training data found for", training_data_origin.id)
+            continue
         config = replace(config, batch_size=min(config.batch_size, len(training_data)))
         if args.downsample:
             generator = np.random.default_rng(config.seed)
             training_data = training_data.reindex(generator.permutation(len(training_data))[:config.batch_size])
-        if training_data is None:
-            print("Warning: No training data found for", training_data_origin.id)
-            continue
         training_data = training_data.process(config)
         metrics = defaultdict(list)
         htmls = []
-        print(f"Starting training (size: {len(training_data)}/{training_data.numel_base()})")
-        for train_split, test_split in training_data.split(config.n_folds, config.seed):
-            print("Training", flush=True)
+        try:
+            splits = training_data.split(config.n_folds, config.seed)
+        except ValueError:
+            print("Warning: Not enough data to split")
+            continue
+
+        for i, (train_split, test_split) in enumerate(splits):
             with torch.set_grad_enabled(True):
                 probe = train_probe(train_split, config, device)
+            
+            new_config_path = save_path / f"config_{i}.json"
+            with open(new_config_path, "w") as f:
+                json.dump(probe.config.to_dict(), f)
+            n_attempts += 1
+            n_failures += int(config.retrain_n - probe.config.retrain_n)
+
             probe.eval()
             probe.requires_grad_(False)
         
@@ -396,3 +425,4 @@ if __name__ == "__main__":
             json.dump(eval_results, f)
         with open(save_path / "htmls.json", "w") as f:
             json.dump(htmls, f)
+    print(f"Failed {n_failures} out of {n_attempts} attempts")

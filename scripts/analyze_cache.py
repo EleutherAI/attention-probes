@@ -12,7 +12,11 @@ cache_dir = Path("../cache")
 # configs = ["h0", "h0-last"]
 # configs = ["v1", "v1-tanh"]
 # configs = ["v1", "v1-last"]
-configs = ["v1", "v1-lin-last"]
+# configs = ["v1d", "v1d-last"]
+# configs = ["v1d", "v1-lin-last"]
+configs = ["v1d", "v1-lin-mean"]
+# configs = ["v1-lin-mean", "v1-lin-last"]
+# configs = ["v1d-last", "v1-lin-last"]
 results = defaultdict(dict)
 for config in configs:
     for run in (cache_dir / config).glob("*"):
@@ -36,8 +40,11 @@ for setup, config_results in results.items():
 
 names = {
     "v1": "Attention Probe",
+    "v1d": "Attention Probe (downsampled)",
     "v1-last": "Last Token Probe",
+    "v1d-last": "Last Token Probe (downsampled)",
     "v1-lin-last": "Linear Classifier (Last Token)",
+    "v1-lin-mean": "Linear Classifier (Mean)",
     "v1-mean": "Mean Probe",
     "v1-tanh": "Tanh Probe",
     "h0": "Neurons in a Haystack Attention Probe",

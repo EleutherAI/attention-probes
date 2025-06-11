@@ -55,7 +55,7 @@ class Classifier(torch.nn.Module):
         self.linear.weight.data.zero_()
 
     def forward(self, x: Tensor) -> Tensor:
-        return self.linear(x).squeeze(-1)
+        return self.linear(x)
 
     @torch.enable_grad()
     def fit(
@@ -171,7 +171,9 @@ class Classifier(torch.nn.Module):
             for j, l2_penalty in enumerate(l2_penalties):
                 self.fit(train_x, train_y, l2_penalty=l2_penalty, max_iter=max_iter)
 
-                logits = self(val_x).squeeze(-1)
+                logits = self(val_x)
+                if self.linear.out_features == 1:
+                    logits = logits.squeeze(-1)
                 loss = loss_fn(logits, val_y)
                 losses[i, j] = loss
 
