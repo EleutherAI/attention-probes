@@ -52,8 +52,8 @@ names = {
 }
 plt.plot([0, 1], [0, 1], "k--")
 plt.scatter(xs, ys)
-plt.xlabel(names[configs[0]])
-plt.ylabel(names[configs[1]])
+plt.xlabel(names.get(configs[0], configs[0]))
+plt.ylabel(names.get(configs[1], configs[1]))
 plt.xlim(0, 1)
 plt.ylim(0, 1)
 plt.show()
