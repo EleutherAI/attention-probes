@@ -7,8 +7,11 @@ class AttentionProbe(nn.Module):
         super().__init__()
         # projection from inputs to attention logits
         self.q = nn.Linear(d_in, n_heads, bias=False)
+        self.q.weight.data.zero_()
         # projection to per-head output logits (or pre-MLP intermediate states)
         self.v = nn.Linear(d_in, n_heads * (hidden_dim or output_dim))
+        self.v.weight.data.zero_()
+        self.v.bias.data.zero_()
 
         self.n_heads = n_heads
         self.output_dim = output_dim

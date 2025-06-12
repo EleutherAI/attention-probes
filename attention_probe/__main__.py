@@ -2,6 +2,7 @@
 from .attention_probe import AttentionProbe
 from .linear_classifier import Classifier as LinearClassifier
 from torch.nn import functional as F
+import os
 
 from jaxtyping import Float, Int, Bool, Array
 import json
@@ -20,6 +21,10 @@ from transformers import AutoTokenizer
 from simple_parsing import Serializable, list_field, parse, field
 from dataclasses import dataclass, replace
 from copy import copy
+
+
+DEBUG = os.environ.get("DEBUG", "0") == "1"
+
 
 @dataclass
 class AttentionProbeTrainConfig(Serializable):
@@ -226,27 +231,31 @@ def train_probe_iteration(train_split: TrainingData, config: MulticlassTrainConf
         train_tensor = train_split.to_tensor(device="cpu")
     
     loss = torch.inf
+    bar = trange(config.train_iterations, desc=f"Training")
     def closure():
         nonlocal loss
         optimizer.zero_grad()
-        indices = torch.randint(0, len(train_split.y), (config.batch_size,), device=train_tensor.device)
-        train_batch = train_tensor.reindex(indices).trim().to_tensor(device=device)
+        if len(train_split.y) <= config.batch_size:
+            train_batch = train_tensor
+        else:
+            indices = torch.randint(0, len(train_split.y), (config.batch_size,), device=train_tensor.device)
+            train_batch = train_tensor.reindex(indices)
+        train_batch = train_batch.trim().to_tensor(device=device)
         out = probe(train_batch.x, train_batch.mask, train_batch.position)
         if not train_split.multi_class:
             loss = F.binary_cross_entropy_with_logits(out, train_batch.y.float()[..., None])
         else:
             loss = F.cross_entropy(out, train_batch.y.long())
         loss.backward()
+        bar.set_postfix(loss=loss.item())
         return loss
     
     with torch.set_grad_enabled(True):
         if config.train_lbfgs:
             optimizer.step(closure)
-            print("Trained with LBFGS to loss", loss.item())
         else:
-            for _ in (bar := trange(config.train_iterations, desc=f"Training {config.model_name} {config.layer_num} {config.sae_size}")):
+            for _ in bar:
                 optimizer.step(closure)
-                bar.set_postfix(loss=loss.item())
     return probe, loss.item()
 
 def train_probe(train_split: TrainingData, config: MulticlassTrainConfig, device: torch.device):
