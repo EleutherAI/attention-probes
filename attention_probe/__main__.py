@@ -21,6 +21,7 @@ from transformers import AutoTokenizer
 from simple_parsing import Serializable, list_field, parse, field
 from dataclasses import dataclass, replace
 from copy import copy
+from sklearn.metrics import f1_score
 
 
 DEBUG = os.environ.get("DEBUG", "0") == "1"
@@ -248,6 +249,8 @@ def train_probe_iteration(train_split: TrainingData, config: MulticlassTrainConf
             loss = F.cross_entropy(out, train_batch.y.long())
         loss.backward()
         bar.set_postfix(loss=loss.item())
+        if config.train_lbfgs:
+            bar.update(1)
         return loss
     
     with torch.set_grad_enabled(True):
@@ -293,7 +296,7 @@ class RunConfig(Serializable):
     output_path: Path = Path("cache")
     display_now: bool = False
     run_set: str = "test"
-    skip_existing: bool = True
+    skip_existing: bool = False
     # Reduce dataset size to batch size
     downsample: bool = False
 
@@ -420,6 +423,8 @@ if __name__ == "__main__":
                 accuracy = accuracy_score(test_split.y, probs.argmax(axis=-1))
             else:
                 accuracy = accuracy_score(test_split.y, probs > 0.5)
+                f1 = f1_score(test_split.y, probs > 0.5)
+                metrics['f1'].append(f1)
             metrics['accuracy'].append(accuracy)
             if not test_data.multi_class:
                 try:
@@ -438,10 +443,16 @@ if __name__ == "__main__":
             roc_aucs = None
         accuracies = metrics['accuracy']
         print(f"Mean Accuracy: {np.mean(accuracies):.4f} ± {np.std(accuracies):.4f}")
+        if "f1" in metrics:
+            f1s = metrics['f1']
+            print(f"Mean F1: {np.mean(f1s):.4f} ± {np.std(f1s):.4f}")
+        else:
+            f1s = None
     
         eval_results = dict(
             accuracies=accuracies,
             roc_aucs=roc_aucs,
+            f1s=f1s,
         )
         with open(save_path / "eval_results.json", "w") as f:
             json.dump(eval_results, f)

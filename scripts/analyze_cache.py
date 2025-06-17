@@ -5,28 +5,45 @@ from collections import defaultdict
 import numpy as np
 import matplotlib.pyplot as plt
 
+metric_name = "auc"
+metric_name = "f1"
+metric_nice = dict(
+    auc="ROC AUC",
+    acc="Accuracy",
+    f1="F1",
+)[metric_name]
 cache_dir = Path("../cache")
-# configs = ["v0", "v0-last"]
-# configs = ["v1", "v1-last", "v1-mean", "v1-tanh"]
+configs = ["v1", "v1-last"]
+# configs = ["h1", "h1-mean"]
+# configs = ["h1", "h1-last"]
+# configs = ["v1", "v1-adam"]
+# configs = ["v1-adam", "v1-mean"]
+# configs = ["v1-adam", "v1-last"]
+# configs = ["v1-adam", "v1-last-adam"]
 # configs = ["v1", "v1-mean"]
-# configs = ["h0", "h0-last"]
-# configs = ["v1", "v1-tanh"]
-# configs = ["v1", "v1-last"]
-# configs = ["v1d", "v1d-last"]
-# configs = ["v1d", "v1-lin-last"]
-configs = ["v1d", "v1-lin-mean"]
-# configs = ["v1-lin-mean", "v1-lin-last"]
-# configs = ["v1d-last", "v1-lin-last"]
+# configs = ["v1-last", "v1-mean"]
 results = defaultdict(dict)
 for config in configs:
     for run in (cache_dir / config).glob("*"):
         try:
-            results[run.name][config] = np.mean(json.load(open(run / "eval_results.json"))["accuracies"])
+            eval_results = json.load(open(run / "eval_results.json"))
+            if metric_name == "acc":
+                results[run.name][config] = np.mean(eval_results["accuracies"])
+            elif metric_name == "f1":
+                if eval_results.get("f1s", None) is None:
+                    continue
+                results[run.name][config] = np.mean(eval_results["f1s"])
+            elif metric_name == "auc":
+                if eval_results.get("roc_aucs", None) is None:
+                    continue
+                results[run.name][config] = np.mean(eval_results["roc_aucs"])
         except FileNotFoundError:
             pass
 xs = []
 ys = []
-for setup, config_results in results.items():
+colors = []
+cmap = plt.get_cmap("tab20")
+for i, (setup, config_results) in enumerate(results.items()):
     print(setup)
     for config in results[setup]:
         print(f"    {config}: {config_results[config]:.2f}")
@@ -37,6 +54,7 @@ for setup, config_results in results.items():
     else:
         xs.append(config_results[configs[0]])
         ys.append(config_results[configs[1]])
+        colors.append(cmap(i))
 
 names = {
     "v1": "Attention Probe",
@@ -47,13 +65,14 @@ names = {
     "v1-lin-mean": "Linear Classifier (Mean)",
     "v1-mean": "Mean Probe",
     "v1-tanh": "Tanh Probe",
-    "h0": "Neurons in a Haystack Attention Probe",
-    "h0-last": "Neurons in a Haystack Last Token Probe",
+    "h1": "Neurons in a Haystack Attention Probe",
+    "h1-last": "Neurons in a Haystack Last Token Probe",
+    "h1-mean": "Neurons in a Haystack Mean Probe",
 }
 plt.plot([0, 1], [0, 1], "k--")
-plt.scatter(xs, ys)
-plt.xlabel(names.get(configs[0], configs[0]))
-plt.ylabel(names.get(configs[1], configs[1]))
+plt.scatter(xs, ys, c=colors)
+plt.xlabel(names.get(configs[0], configs[0]) + f" ({metric_nice})")
+plt.ylabel(names.get(configs[1], configs[1]) + f" ({metric_nice})")
 plt.xlim(0, 1)
 plt.ylim(0, 1)
 plt.show()
