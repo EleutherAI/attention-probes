@@ -6,22 +6,21 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 metric_name = "auc"
-metric_name = "f1"
+metric_name = "acc"
+# metric_name = "f1"
 metric_nice = dict(
     auc="ROC AUC",
     acc="Accuracy",
     f1="F1",
 )[metric_name]
+
 cache_dir = Path("../cache")
-configs = ["v1", "v1-last"]
-# configs = ["h1", "h1-mean"]
-# configs = ["h1", "h1-last"]
-# configs = ["v1", "v1-adam"]
-# configs = ["v1-adam", "v1-mean"]
-# configs = ["v1-adam", "v1-last"]
-# configs = ["v1-adam", "v1-last-adam"]
-# configs = ["v1", "v1-mean"]
-# configs = ["v1-last", "v1-mean"]
+# configs = ["v1", "v1-last"]
+# configs = ["v1-mean", "v1-last"]
+configs = ["v1-mean", "v1"]
+# configs = ["v1-mean", "v1-dropout"]
+# configs = ["v1", "v1-dropout"]
+# configs = ["v1-mean", "v1-absmax"]
 results = defaultdict(dict)
 for config in configs:
     for run in (cache_dir / config).glob("*"):
@@ -58,6 +57,7 @@ for i, (setup, config_results) in enumerate(results.items()):
 
 names = {
     "v1": "Attention Probe",
+    "v1-dropout": "Attention Probe w/ dropout",
     "v1d": "Attention Probe (downsampled)",
     "v1-last": "Last Token Probe",
     "v1d-last": "Last Token Probe (downsampled)",
@@ -73,8 +73,8 @@ plt.plot([0, 1], [0, 1], "k--")
 plt.scatter(xs, ys, c=colors)
 plt.xlabel(names.get(configs[0], configs[0]) + f" ({metric_nice})")
 plt.ylabel(names.get(configs[1], configs[1]) + f" ({metric_nice})")
-plt.xlim(0, 1)
-plt.ylim(0, 1)
+plt.xlim(0.5, 1)
+plt.ylim(0.5, 1)
 plt.show()
 # %%
 from IPython.display import HTML, display

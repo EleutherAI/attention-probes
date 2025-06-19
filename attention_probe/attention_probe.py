@@ -3,19 +3,18 @@ import torch
 from typing import Any
 
 class AttentionProbe(nn.Module):
-    def __init__(self, d_in, n_heads, output_dim: int = 1, hidden_dim: int = 0, use_tanh: bool = False, config: Any = None):
+    def __init__(self, d_in, n_heads, output_dim: int = 1, hidden_dim: int = 0, use_tanh: bool = False, attn_dropout_p: float = 0.0, config: Any = None):
         super().__init__()
         # projection from inputs to attention logits
         self.q = nn.Linear(d_in, n_heads, bias=False)
         self.q.weight.data.zero_()
         # projection to per-head output logits (or pre-MLP intermediate states)
         self.v = nn.Linear(d_in, n_heads * (hidden_dim or output_dim))
-        self.v.weight.data.zero_()
-        self.v.bias.data.zero_()
 
         self.n_heads = n_heads
         self.output_dim = output_dim
         self.use_tanh = use_tanh
+        self.attn_dropout_p = attn_dropout_p
         # alibi-like relative (to the beginning/end of the sequence) position bias
         self.position_weight = nn.Parameter(torch.zeros((n_heads,), dtype=torch.float32))
         # MLP after the attention
@@ -36,6 +35,8 @@ class AttentionProbe(nn.Module):
         # elements that are masked are set to -infinity
         # position is added to the key weighted by the per-head position_weight
         k = self.q(x) - ((1 - mask.float()) * 1e9)[..., None] + position[..., None] * self.position_weight
+        # apply dropout to the keys
+        l = torch.where(torch.rand_like(k) < self.attn_dropout_p, -1e9, k)
         # p: (batch_size, seq_len, n_heads)
         # probability of each element after softmax, with masked elements set to 0
         # dim=-2 is the sequence length dimension

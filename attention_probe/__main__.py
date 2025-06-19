@@ -33,13 +33,16 @@ class AttentionProbeTrainConfig(Serializable):
     Config for training an attention probe.
     """
     learning_rate: float = 1e-4
-    train_lbfgs: bool = False
+    train_lbfgs: bool = True
     weight_decay: float = 0.0
     train_iterations: int = 2000
     n_heads: int = 1
+    attn_dropout_p: float = 0.0
     use_linear_classifier: bool = False
     last_only: bool = False
     take_mean: bool = False
+    absmax_pool: bool = False
+    finetune_attn: bool = False
     hidden_dim: int = 0
     use_tanh: bool = False
     batch_size: int = 2048
@@ -47,6 +50,13 @@ class AttentionProbeTrainConfig(Serializable):
     seed: int = 5
     retrain_threshold: float = 0.5
     retrain_n: int = 5
+    
+    @property
+    def one_token(self) -> bool:
+        return self.last_only or self.take_mean or self.absmax_pool
+    
+    def not_one_token(self) -> "AttentionProbeTrainConfig":
+        return replace(self, last_only=False, take_mean=False, absmax_pool=False)
 
 @dataclass
 class MulticlassTrainConfig(AttentionProbeTrainConfig):
@@ -125,7 +135,8 @@ class TrainingData:
     def split(self, n_folds: int, seed: int) -> list[tuple["TrainingData", "TrainingData"]]:
         kfold = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=seed)
         splits = list(kfold.split(self.y, self.y))
-        return [(self.reindex(split[0]), self.reindex(split[1])) for split in splits]
+        for train_indices, test_indices in splits:
+            yield self.reindex(train_indices), self.reindex(test_indices)
     
     @torch.no_grad()
     def to_tensor(self, device: torch.device = None) -> "TrainingData":
@@ -158,10 +169,13 @@ class TrainingData:
         
         if config.last_only:
             self.mask = self.mask * (self.position == (self.position * self.mask).max(dim=-1, keepdim=True).values)
-        if config.take_mean or config.last_only:
+        if config.last_only or config.take_mean:
             mask_sum = self.mask.sum(-1, keepdim=True)[..., None]
             mask_sum = torch.maximum(mask_sum, torch.ones_like(mask_sum))
             self.x = (self.x * self.mask[..., None]).sum(-2, keepdim=True) / mask_sum
+            self.mask = torch.ones_like(self.x[..., 0])
+        if config.absmax_pool:
+            self.x = self.x.abs().max(dim=-1, keepdim=True).values
             self.mask = torch.ones_like(self.x[..., 0])
         self.x = torch.nan_to_num(self.x, nan=0.0, posinf=0.0, neginf=0.0)
         return self
@@ -208,19 +222,29 @@ def get_data(training_data_origin: TrainingDataOrigin, limit: int | None = None,
 
 
 def attention_probe_from_config(config: MulticlassTrainConfig, train_split: TrainingData) -> AttentionProbe:
-    return AttentionProbe(
+    if config.one_token:
+        config = replace(config, attn_dropout_p=0.0)
+    probe = AttentionProbe(
         train_split.x.shape[-1],
         config.n_heads,
         hidden_dim=config.hidden_dim,
         output_dim=1 if not train_split.multi_class else train_split.n_classes,
         use_tanh=config.use_tanh,
+        attn_dropout_p=config.attn_dropout_p,
         config=config,
     )
+    if config.last_only:
+        probe.position_weight.data[:] = 1.0
+    return probe
 
 
-def train_probe_iteration(train_split: TrainingData, config: MulticlassTrainConfig, device: torch.device) -> tuple[AttentionProbe, float]:
+def train_probe_iteration(train_split: TrainingData, config: MulticlassTrainConfig, device: torch.device, start_from: AttentionProbe | None = None) -> tuple[AttentionProbe, float]:
     train_split = train_split.trim()
     probe = attention_probe_from_config(config, train_split)
+    if start_from is not None:
+        probe.load_state_dict(start_from.state_dict())
+        torch.nn.init.normal_(probe.q.weight.data, mean=0.0, std=0.01)
+        torch.nn.init.normal_(probe.position_weight.data, mean=0.0, std=0.01)
     probe = probe.to(device, torch.float32)
     if config.train_lbfgs:
         optimizer = torch.optim.LBFGS(probe.parameters(), line_search_fn="strong_wolfe", max_iter=config.train_iterations)
@@ -247,7 +271,11 @@ def train_probe_iteration(train_split: TrainingData, config: MulticlassTrainConf
             loss = F.binary_cross_entropy_with_logits(out, train_batch.y.float()[..., None])
         else:
             loss = F.cross_entropy(out, train_batch.y.long())
-        loss.backward()
+        train_loss = loss
+        if config.train_lbfgs:
+            for param in probe.parameters():
+                train_loss += param.pow(2).mul(config.weight_decay).div(2).sum()
+        train_loss.backward()
         bar.set_postfix(loss=loss.item())
         if config.train_lbfgs:
             bar.update(1)
@@ -262,8 +290,10 @@ def train_probe_iteration(train_split: TrainingData, config: MulticlassTrainConf
     return probe, loss.item()
 
 def train_probe(train_split: TrainingData, config: MulticlassTrainConfig, device: torch.device):
+    train_split_original = train_split
+    train_split = train_split.process(config)
     if config.use_linear_classifier:
-        assert config.last_only or config.take_mean
+        assert config.one_token
         n_classes = train_split.n_classes
         if n_classes == 2:
             n_classes = 1
@@ -277,7 +307,12 @@ def train_probe(train_split: TrainingData, config: MulticlassTrainConfig, device
         att_probe.v.bias.data[:] = probe.linear.bias.data
         return att_probe
     
-    probe, loss = train_probe_iteration(train_split, config, device)
+    probe_start = None
+    if config.finetune_attn:
+        probe_start, _ = train_probe_iteration(train_split, config, device)
+        config = replace(config, train_lbfgs=False).not_one_token()
+        train_split = train_split_original.process(config)
+    probe, loss = train_probe_iteration(train_split, config, device, start_from=probe_start)
     if loss > config.retrain_threshold and config.retrain_n > 0:
         del probe, loss
         return train_probe(train_split, replace(config, retrain_n=config.retrain_n - 1, seed=config.seed + 1), device)
@@ -290,15 +325,18 @@ class RunConfig(Serializable):
     datasets: list[str] = list_field()
     # models: list[str] = list_field("google/gemma-2-2b")
     models: list[str] = list_field()
-    # sae_sizes: list[str] = list_field("16k")
-    sae_sizes: list[str] = list_field()
+    sae_sizes: list[str] = list_field("16k")
+    # sae_sizes: list[str] = list_field()
+    
+    downsample: bool = True
+    downsample_to: int = 16384
+    min_per_class: int = 200
+    
     cache_source: Path = Path("output")
     output_path: Path = Path("cache")
     display_now: bool = False
     run_set: str = "test"
     skip_existing: bool = False
-    # Reduce dataset size to batch size
-    downsample: bool = False
 
 
 TOKENIZER_NAMES = {
@@ -360,15 +398,18 @@ if __name__ == "__main__":
             continue
 
         tokenizer = AutoTokenizer.from_pretrained(training_data_origin.model_name)
-        training_data = get_data(training_data_origin, limit=config.batch_size if args.downsample else None, seed=config.seed)
+        training_data = get_data(training_data_origin, limit=args.downsample_to if args.downsample else None, seed=config.seed)
         if training_data is None:
             print("Warning: No training data found for", training_data_origin.id)
+            continue
+        class_counts = np.bincount(training_data.y)
+        if min(class_counts) < args.min_per_class:
+            print("Warning: Not enough data for some classes")
             continue
         config = replace(config, batch_size=min(config.batch_size, len(training_data)))
         if args.downsample:
             generator = np.random.default_rng(config.seed)
             training_data = training_data.reindex(generator.permutation(len(training_data))[:config.batch_size])
-        training_data = training_data.process(config)
         metrics = defaultdict(list)
         htmls = []
         try:
@@ -381,6 +422,8 @@ if __name__ == "__main__":
             with torch.set_grad_enabled(True):
                 probe = train_probe(train_split, config, device)
             
+            test_split = test_split.process(probe.config)
+            
             new_config_path = save_path / f"config_{i}.json"
             with open(new_config_path, "w") as f:
                 json.dump(probe.config.to_dict(), f)
@@ -390,19 +433,25 @@ if __name__ == "__main__":
             probe.eval()
             probe.requires_grad_(False)
         
+            print("Evaluating")
             test_data = test_split.to_tensor(device=device)
             with torch.inference_mode(), torch.autocast(device_type=device.type):
                 attns = []
+                all_probs = []
                 probe.attn_hook.register_forward_hook(lambda _, __, output: attns.append(output.detach().cpu().numpy()))
-                out = probe(test_data.x, test_data.mask, test_data.position)
-                if not test_data.multi_class:
-                    probs = out.sigmoid().detach().cpu().numpy()[..., 0]
-                else:
-                    probs = out.softmax(dim=-1).detach().cpu().numpy()
+                for batch_start in trange(0, len(test_data), config.batch_size):
+                    batch_end = min(batch_start + config.batch_size, len(test_data))
+                    batch = test_data.reindex(torch.arange(batch_start, batch_end, device=device))
+                    out = probe(batch.x, batch.mask, batch.position)
+                    if not test_data.multi_class:
+                        probs = out.sigmoid().detach().cpu().numpy()[..., 0]
+                    else:
+                        probs = out.softmax(dim=-1).detach().cpu().numpy()
+                    all_probs.append(probs)
                 probe.attn_hook._foward_hooks = OrderedDict()
                 attns = np.concatenate(attns)
+                probs = np.concatenate(all_probs)
 
-            print("Evaluating")
             for i in np.random.randint(0, len(attns), 15):
                 input_id, attn, label = test_data.input_ids[i], attns[i], test_data.text_label(test_data.y[i])
                 html = []
