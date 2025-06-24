@@ -35,8 +35,9 @@ class AttentionProbe(nn.Module):
         # elements that are masked are set to -infinity
         # position is added to the key weighted by the per-head position_weight
         k = self.q(x) - ((1 - mask.float()) * 1e9)[..., None] + position[..., None] * self.position_weight
-        # apply dropout to the keys
-        l = torch.where(torch.rand_like(k) < self.attn_dropout_p, -1e9, k)
+        if self.training:
+            # apply dropout to the keys
+            k = torch.where(torch.rand_like(k) < self.attn_dropout_p, -1e9, k)
         # p: (batch_size, seq_len, n_heads)
         # probability of each element after softmax, with masked elements set to 0
         # dim=-2 is the sequence length dimension

@@ -1,17 +1,18 @@
 #%%
-from .attention_probe import AttentionProbe
-from .linear_classifier import Classifier as LinearClassifier
-from torch.nn import functional as F
 import os
-
-from jaxtyping import Float, Int, Bool, Array
 import json
-from pathlib import Path
-import pandas as pd
+from typing import Optional
 from collections import defaultdict, OrderedDict
 import torch
 import hashlib
 import re
+from pathlib import Path
+
+from .attention_probe import AttentionProbe
+from .linear_classifier import Classifier as LinearClassifier
+from torch.nn import functional as F
+from jaxtyping import Float, Int, Bool, Array
+import pandas as pd
 from tqdm.auto import trange
 from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import LabelEncoder
@@ -33,19 +34,41 @@ class AttentionProbeTrainConfig(Serializable):
     Config for training an attention probe.
     """
     learning_rate: float = 1e-4
+    """Learning rate for Adam."""
     train_lbfgs: bool = True
+    """Use LBFGS instead of Adam."""
     weight_decay: float = 0.0
+    """Weight decay coefficient."""
     train_iterations: int = 2000
+    """Number of training iterations."""
     n_heads: int = 1
+    """Number of attention heads."""
     attn_dropout_p: float = 0.0
+    """Dropout probability for attention probes."""
     use_linear_classifier: bool = False
+    """Use a linear classifier instead of an attention probe.
+    Trained with cross-validation for tuning weight decay. Uses LBFGS.
+    Only use with one-token datasets."""
+    
     last_only: bool = False
+    """Transforms the data such that only the last token is used.
+    Any attention probe becomes a one-token linear classifier."""
     take_mean: bool = False
+    """Transforms the data such that the mean of the hidden states across sequence length is used.
+    Any attention probe becomes a one-token linear classifier."""
     absmax_pool: bool = False
+    """Transforms the data such that the absolute maximum of the hidden states across sequence length is used.
+    Any attention probe becomes a one-token linear classifier."""
     finetune_attn: bool = False
+    """If we are training a mean probe or a last token probe, take a trained probe
+    and finetune it into an attention probe."""
+    ensemble_mean: bool = False
+    """If we are training an attention probe, train a mean probe head independently from the attention probe."""
+    
     hidden_dim: int = 0
     use_tanh: bool = False
     batch_size: int = 2048
+    always_move_to_device: bool = True
     device: str = "cuda"
     seed: int = 5
     retrain_threshold: float = 0.5
@@ -83,6 +106,7 @@ class TrainingData:
     input_ids: Int[Array, "batch_size seq_len"]
     n_classes: int
     class_mapping: dict[int, str] | None = None
+    y_addition: Optional[Float[Array, "batch_size n_classes"]] = None
     
     @property
     def multi_class(self) -> bool:
@@ -121,13 +145,16 @@ class TrainingData:
         assert indices.ndim == 1
         assert int(max(indices)) < len(self)
         if self.is_tensor and isinstance(indices, np.ndarray):
-            indices = torch.from_numpy(indices).to(self.device)
+            indices = torch.from_numpy(indices)
+        if self.is_tensor:
+            indices = indices.to(self.device)
         return replace(
             self,
             x=self.x[indices],
             mask=self.mask[indices],
             position=self.position[indices],
             y=self.y[indices],
+            y_addition=self.y_addition[indices] if self.y_addition is not None else None,
             input_ids=self.input_ids[indices],
         )
     
@@ -147,6 +174,7 @@ class TrainingData:
                 mask=self.mask.to(device),
                 position=self.position.to(device),
                 y=self.y.to(device),
+                y_addition=self.y_addition.to(device) if self.y_addition is not None else None,
                 input_ids=self.input_ids.to(device),
             )
         return replace(
@@ -155,6 +183,7 @@ class TrainingData:
             mask=torch.tensor(self.mask, dtype=torch.bool, device=device),
             position=torch.tensor(self.position, dtype=torch.int32, device=device),
             y=torch.tensor(self.y, dtype=torch.int32, device=device),
+            y_addition=torch.tensor(self.y_addition, dtype=torch.float32, device=device) if self.y_addition is not None else None,
             input_ids=torch.tensor(self.input_ids, dtype=torch.int32, device=device),
         )
     
@@ -254,6 +283,8 @@ def train_probe_iteration(train_split: TrainingData, config: MulticlassTrainConf
         train_tensor = train_split.to_tensor(device=device)
     else:
         train_tensor = train_split.to_tensor(device="cpu")
+    if config.always_move_to_device:
+        train_tensor = train_tensor.trim().to_tensor(device=device)
     
     loss = torch.inf
     bar = trange(config.train_iterations, desc=f"Training")
@@ -267,6 +298,8 @@ def train_probe_iteration(train_split: TrainingData, config: MulticlassTrainConf
             train_batch = train_tensor.reindex(indices)
         train_batch = train_batch.trim().to_tensor(device=device)
         out = probe(train_batch.x, train_batch.mask, train_batch.position)
+        if train_split.y_addition is not None:
+            out = out + train_split.y_addition
         if not train_split.multi_class:
             loss = F.binary_cross_entropy_with_logits(out, train_batch.y.float()[..., None])
         else:
@@ -316,7 +349,45 @@ def train_probe(train_split: TrainingData, config: MulticlassTrainConfig, device
     if loss > config.retrain_threshold and config.retrain_n > 0:
         del probe, loss
         return train_probe(train_split, replace(config, retrain_n=config.retrain_n - 1, seed=config.seed + 1), device)
+    if config.ensemble_mean:
+        train_predictions = evaluate_probe(probe, train_split, config)
+        mean_config = replace(config, train_lbfgs=True, take_mean=True)
+        train_predictions = torch.from_numpy(train_predictions).to(device)
+        train_split = replace(train_split.process(mean_config), y_addition=train_predictions)
+        mean_probe, _ = train_probe_iteration(train_split, mean_config, device)
+        mean_probe_sd = mean_probe.state_dict()
+        for name, param in probe.named_parameters():
+            param.data = torch.cat([param.data, mean_probe_sd[name].data], dim=0)
+        probe.n_heads += mean_probe.n_heads
     return probe
+
+def evaluate_probe(probe: AttentionProbe, test_data: TrainingData, config: MulticlassTrainConfig, compute_attn: bool = False, use_activation: bool = False) -> \
+    tuple[Float[Array, "batch_size n_heads seq_len"], Float[Array, "batch_size n_classes"]] | Float[Array, "batch_size n_classes"]:
+    device = next(probe.parameters()).device
+    with torch.inference_mode(), torch.autocast(device_type=device.type):
+        attns = []
+        all_probs = []
+        if compute_attn:
+            probe.attn_hook.register_forward_hook(lambda _, __, output: attns.append(output.detach().cpu().numpy()))
+        for batch_start in trange(0, len(test_data), config.batch_size):
+            batch_end = min(batch_start + config.batch_size, len(test_data))
+            batch = test_data.reindex(torch.arange(batch_start, batch_end, device=device))
+            batch = batch.to_tensor(device=device)
+            out = probe(batch.x, batch.mask, batch.position)
+            if use_activation:
+                if not test_data.multi_class:
+                    out = out.sigmoid()[..., 0]
+                else:
+                    out = out.softmax(dim=-1)
+            probs = out.detach().cpu().numpy()
+            all_probs.append(probs)
+        probe.attn_hook._foward_hooks = OrderedDict()
+        if compute_attn:
+            attns = np.concatenate(attns)
+        probs = np.concatenate(all_probs)
+    if compute_attn:
+        return probs, attns
+    return probs
 
 @dataclass
 class RunConfig(Serializable):
@@ -336,7 +407,7 @@ class RunConfig(Serializable):
     output_path: Path = Path("cache")
     display_now: bool = False
     run_set: str = "test"
-    skip_existing: bool = False
+    skip_existing: bool = True
 
 
 TOKENIZER_NAMES = {
@@ -389,22 +460,31 @@ if __name__ == "__main__":
         key_encoded = training_data_origin.id
         save_path = args.output_path / args.run_set / key_encoded
         save_path.mkdir(parents=True, exist_ok=True)
+        if args.skip_existing and (save_path / "eval_results.json").exists():
+            print("Skipping existing run")
+            continue
+    
+        def skip():
+            eval_results = save_path / "eval_results.json"
+            if eval_results.exists():
+                return
+            eval_results.touch()
+    
         with open(save_path / "config.json", "w") as f:
             json.dump(config.to_dict(), f)
         with open(save_path / "data.json", "w") as f:
             json.dump(training_data_origin.to_dict(), f)
-        if args.skip_existing and (save_path / "eval_results.json").exists():
-            print("Skipping existing run")
-            continue
 
         tokenizer = AutoTokenizer.from_pretrained(training_data_origin.model_name)
         training_data = get_data(training_data_origin, limit=args.downsample_to if args.downsample else None, seed=config.seed)
         if training_data is None:
             print("Warning: No training data found for", training_data_origin.id)
+            skip()
             continue
         class_counts = np.bincount(training_data.y)
         if min(class_counts) < args.min_per_class:
             print("Warning: Not enough data for some classes")
+            skip()
             continue
         config = replace(config, batch_size=min(config.batch_size, len(training_data)))
         if args.downsample:
@@ -416,6 +496,7 @@ if __name__ == "__main__":
             splits = training_data.split(config.n_folds, config.seed)
         except ValueError:
             print("Warning: Not enough data to split")
+            skip()
             continue
 
         for i, (train_split, test_split) in enumerate(splits):
@@ -435,22 +516,14 @@ if __name__ == "__main__":
         
             print("Evaluating")
             test_data = test_split.to_tensor(device=device)
-            with torch.inference_mode(), torch.autocast(device_type=device.type):
-                attns = []
-                all_probs = []
-                probe.attn_hook.register_forward_hook(lambda _, __, output: attns.append(output.detach().cpu().numpy()))
-                for batch_start in trange(0, len(test_data), config.batch_size):
-                    batch_end = min(batch_start + config.batch_size, len(test_data))
-                    batch = test_data.reindex(torch.arange(batch_start, batch_end, device=device))
-                    out = probe(batch.x, batch.mask, batch.position)
-                    if not test_data.multi_class:
-                        probs = out.sigmoid().detach().cpu().numpy()[..., 0]
-                    else:
-                        probs = out.softmax(dim=-1).detach().cpu().numpy()
-                    all_probs.append(probs)
-                probe.attn_hook._foward_hooks = OrderedDict()
-                attns = np.concatenate(attns)
-                probs = np.concatenate(all_probs)
+            probs, attns = evaluate_probe(probe, test_data, config, compute_attn=True)
+            entropy = -(attns * np.nan_to_num(np.log(attns), nan=0.0, posinf=0.0, neginf=0.0)).sum(axis=1).mean()
+            numbers_of_elements = (attns > 0).sum(axis=1)
+            entropies = -np.log(1 / numbers_of_elements)
+            entropy_baseline = entropies.mean()
+            print(f"Entropy: {entropy:.2f} (Baseline: {entropy_baseline:.2f})")
+            metrics['entropy'].append(float(entropy))
+            metrics['entropy_baseline'].append(float(entropy_baseline))
 
             for i in np.random.randint(0, len(attns), 15):
                 input_id, attn, label = test_data.input_ids[i], attns[i], test_data.text_label(test_data.y[i])
@@ -502,6 +575,8 @@ if __name__ == "__main__":
             accuracies=accuracies,
             roc_aucs=roc_aucs,
             f1s=f1s,
+            entropy=metrics['entropy'],
+            entropy_baseline=metrics['entropy_baseline'],
         )
         with open(save_path / "eval_results.json", "w") as f:
             json.dump(eval_results, f)

@@ -1794,6 +1794,7 @@ dependencies = [
     { name = "spacy" },
     { name = "spacy-alignments" },
     { name = "sparqlwrapper" },
+    { name = "torch" },
 ]
 
 [package.metadata]
@@ -1811,6 +1812,7 @@ requires-dist = [
     { name = "spacy", specifier = ">=3.8.5" },
     { name = "spacy-alignments", specifier = ">=0.9.1" },
     { name = "sparqlwrapper", specifier = ">=2.0.0" },
+    { name = "torch", specifier = ">=2.7.0" },
 ]
 
 [[package]]

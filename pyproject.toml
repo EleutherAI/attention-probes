@@ -18,6 +18,7 @@ dependencies = [
     "spacy>=3.8.5",
     "spacy-alignments>=0.9.1",
     "sparqlwrapper>=2.0.0",
+    "torch>=2.7.0",
 ]
 
 [tool.uv.sources]

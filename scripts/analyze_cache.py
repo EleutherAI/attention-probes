@@ -17,7 +17,13 @@ metric_nice = dict(
 cache_dir = Path("../cache")
 # configs = ["v1", "v1-last"]
 # configs = ["v1-mean", "v1-last"]
-configs = ["v1-mean", "v1"]
+# configs = ["v1-mean", "v1"]
+# configs = ["v1", "v1-no-ft"]
+# configs = ["v1-mean", "v1-no-ft"]
+# configs = ["v1-mean", "v1"]
+# configs = ["v1-mean", "v1-8heads"]
+configs = ["v1-mean", "v1-8heads-no-ft"]
+# configs = ["v1", "v1-8heads"]
 # configs = ["v1-mean", "v1-dropout"]
 # configs = ["v1", "v1-dropout"]
 # configs = ["v1-mean", "v1-absmax"]
@@ -57,6 +63,7 @@ for i, (setup, config_results) in enumerate(results.items()):
 
 names = {
     "v1": "Attention Probe",
+    "v1-no-ft": "Attention Probe (not finetuned from mean probe)",
     "v1-dropout": "Attention Probe w/ dropout",
     "v1d": "Attention Probe (downsampled)",
     "v1-last": "Last Token Probe",
@@ -73,8 +80,10 @@ plt.plot([0, 1], [0, 1], "k--")
 plt.scatter(xs, ys, c=colors)
 plt.xlabel(names.get(configs[0], configs[0]) + f" ({metric_nice})")
 plt.ylabel(names.get(configs[1], configs[1]) + f" ({metric_nice})")
-plt.xlim(0.5, 1)
-plt.ylim(0.5, 1)
+min_xy = min(min(xs), min(ys))
+max_xy = max(max(xs), max(ys))
+plt.xlim(min_xy, max_xy)
+plt.ylim(min_xy, max_xy)
 plt.show()
 # %%
 from IPython.display import HTML, display
