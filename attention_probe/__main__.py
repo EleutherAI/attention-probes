@@ -1,10 +1,8 @@
-#%%
 import os
 import json
 from typing import Optional
 from collections import defaultdict, OrderedDict
 import torch
-import hashlib
 import re
 from pathlib import Path
 
@@ -37,6 +35,9 @@ class AttentionProbeTrainConfig(Serializable):
     """Learning rate for Adam."""
     train_lbfgs: bool = True
     """Use LBFGS instead of Adam."""
+    early_stop_iterations: int = 100
+    """Number of iterations without improvement before stopping."""
+    
     weight_decay: float = 0.0
     """Weight decay coefficient."""
     train_iterations: int = 2000
@@ -66,13 +67,22 @@ class AttentionProbeTrainConfig(Serializable):
     """If we are training an attention probe, train a mean probe head independently from the attention probe."""
     
     hidden_dim: int = 0
+    """Post-probe MLP hidden dimension."""
     use_tanh: bool = False
+    """Use tanh instead of softmax for attention."""
     batch_size: int = 2048
+    """Batch size for training."""
     always_move_to_device: bool = True
+    """Even if the data doesn't fit into the GPU, try to move it there."""
     device: str = "cuda"
+    """Device to use for training."""
     seed: int = 5
+    """Seed for initializing the model."""
+    
     retrain_threshold: float = 0.5
+    """Loss level above which we change the seeed and retrain the probe."""
     retrain_n: int = 5
+    """Number of times we are allowed to retrain the probe if the loss is above the threshold."""
     
     @property
     def one_token(self) -> bool:
@@ -288,8 +298,10 @@ def train_probe_iteration(train_split: TrainingData, config: MulticlassTrainConf
     
     loss = torch.inf
     bar = trange(config.train_iterations, desc=f"Training")
+    loss_history = []
+    stopped = False
     def closure():
-        nonlocal loss
+        nonlocal loss, stopped
         optimizer.zero_grad()
         if len(train_split.y) <= config.batch_size:
             train_batch = train_tensor
@@ -310,6 +322,12 @@ def train_probe_iteration(train_split: TrainingData, config: MulticlassTrainConf
                 train_loss += param.pow(2).mul(config.weight_decay).div(2).sum()
         train_loss.backward()
         bar.set_postfix(loss=loss.item())
+        loss_history.append(loss.item())
+        if not config.train_lbfgs and len(loss_history) > config.early_stop_iterations * 2:
+            before, after = loss_history[:-config.early_stop_iterations], loss_history[-config.early_stop_iterations:]
+            if min(before) < min(after):
+                stopped = True
+                return
         if config.train_lbfgs:
             bar.update(1)
         return loss
@@ -320,6 +338,8 @@ def train_probe_iteration(train_split: TrainingData, config: MulticlassTrainConf
         else:
             for _ in bar:
                 optimizer.step(closure)
+                if stopped:
+                    break
     return probe, loss.item()
 
 def train_probe(train_split: TrainingData, config: MulticlassTrainConfig, device: torch.device):
@@ -517,7 +537,7 @@ if __name__ == "__main__":
             print("Evaluating")
             test_data = test_split.to_tensor(device=device)
             probs, attns = evaluate_probe(probe, test_data, config, compute_attn=True)
-            entropy = -(attns * np.nan_to_num(np.log(attns), nan=0.0, posinf=0.0, neginf=0.0)).sum(axis=1).mean()
+            entropy = -(attns * np.log(np.maximum(attns, 1e-10))).sum(axis=1).mean()
             numbers_of_elements = (attns > 0).sum(axis=1)
             entropies = -np.log(1 / numbers_of_elements)
             entropy_baseline = entropies.mean()

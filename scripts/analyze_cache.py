@@ -1,4 +1,20 @@
 #%%
+#%%
+import requests
+from tqdm import tqdm
+import yaml
+config = yaml.load(open("./config.yaml"), Loader=yaml.FullLoader)
+dataset_sizes = {"codeparrot/github-code": 115e6}
+for ds in tqdm(config["datasets"]):
+    name = ds["name"]
+    if name in dataset_sizes:
+        continue
+    API_URL = f"https://datasets-server.huggingface.co/size?dataset={name}"
+    response = requests.get(API_URL)
+    dataset_size = response.json()["size"]["dataset"]["num_rows"]
+    name = name.replace("/", "_")
+    dataset_sizes[name] = dataset_size
+#%%
 from pathlib import Path
 import json
 from collections import defaultdict
@@ -14,24 +30,22 @@ metric_nice = dict(
     f1="F1",
 )[metric_name]
 
-cache_dir = Path("../cache")
-# configs = ["v1", "v1-last"]
-# configs = ["v1-mean", "v1-last"]
-# configs = ["v1-mean", "v1"]
-# configs = ["v1", "v1-no-ft"]
-# configs = ["v1-mean", "v1-no-ft"]
-# configs = ["v1-mean", "v1"]
+cache_dir = Path("./cache")
 # configs = ["v1-mean", "v1-8heads"]
-configs = ["v1-mean", "v1-8heads-no-ft"]
-# configs = ["v1", "v1-8heads"]
-# configs = ["v1-mean", "v1-dropout"]
-# configs = ["v1", "v1-dropout"]
-# configs = ["v1-mean", "v1-absmax"]
+# configs = ["v1-mean", "v1-8heads-no-ft"]
+configs = ["v1-mean", "v1-mean-ensemble"]
 results = defaultdict(dict)
+all_eval_results = {}
+all_data_configs = {}
 for config in configs:
     for run in (cache_dir / config).glob("*"):
         try:
-            eval_results = json.load(open(run / "eval_results.json"))
+            try:
+                eval_results = json.load(open(run / "eval_results.json"))
+            except json.JSONDecodeError:
+                continue
+            all_eval_results[run.name] = eval_results
+            all_data_configs[run.name] = json.load(open(run / "data.json"))
             if metric_name == "acc":
                 results[run.name][config] = np.mean(eval_results["accuracies"])
             elif metric_name == "f1":
@@ -47,7 +61,7 @@ for config in configs:
 xs = []
 ys = []
 colors = []
-cmap = plt.get_cmap("tab20")
+# cmap = plt.get_cmap("tab20")
 for i, (setup, config_results) in enumerate(results.items()):
     print(setup)
     for config in results[setup]:
@@ -59,11 +73,12 @@ for i, (setup, config_results) in enumerate(results.items()):
     else:
         xs.append(config_results[configs[0]])
         ys.append(config_results[configs[1]])
-        colors.append(cmap(i))
+        colors.append(dataset_sizes[all_data_configs[setup]["dataset_path"]])
+        # colors.append(cmap(i))
 
 names = {
     "v1": "Attention Probe",
-    "v1-no-ft": "Attention Probe (not finetuned from mean probe)",
+    "v1-no-ft": "Attention Probe (not ft'd from mean probe)",
     "v1-dropout": "Attention Probe w/ dropout",
     "v1d": "Attention Probe (downsampled)",
     "v1-last": "Last Token Probe",
@@ -75,15 +90,19 @@ names = {
     "h1": "Neurons in a Haystack Attention Probe",
     "h1-last": "Neurons in a Haystack Last Token Probe",
     "h1-mean": "Neurons in a Haystack Mean Probe",
+    "v1-mean-ensemble": "Attention Probe ensembled w/ mean probe",
+    "v1-8heads": "Attention Probe w/ 8 heads",
+    "v1-8heads-no-ft": "Attention Probe w/ 8 heads (not ft'd from mean probe)",
 }
 plt.plot([0, 1], [0, 1], "k--")
-plt.scatter(xs, ys, c=colors)
+plt.scatter(xs, ys, c=colors, norm="log")
 plt.xlabel(names.get(configs[0], configs[0]) + f" ({metric_nice})")
 plt.ylabel(names.get(configs[1], configs[1]) + f" ({metric_nice})")
 min_xy = min(min(xs), min(ys))
 max_xy = max(max(xs), max(ys))
 plt.xlim(min_xy, max_xy)
 plt.ylim(min_xy, max_xy)
+plt.colorbar(label="Dataset size", )
 plt.show()
 # %%
 from IPython.display import HTML, display
