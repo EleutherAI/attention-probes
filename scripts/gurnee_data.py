@@ -1,8 +1,4 @@
-#%%
 import os
-if "data" not in os.listdir():
-    %cd ..
-import torch
 from tqdm import tqdm
 import numpy as np
 from collections import defaultdict
