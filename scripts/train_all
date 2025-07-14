@@ -1,0 +1,4 @@
+#!/bin/bash
+uv run python -m attention_probe.train_mosaic --run_set h-attn --train_lbfgs=False
+uv run python -m attention_probe.train_mosaic --run_set h-mean --take_mean=True
+uv run python -m attention_probe.train_mosaic --run_set h-last --last_only=True

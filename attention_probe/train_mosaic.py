@@ -202,30 +202,44 @@ if __name__ == "__main__":
         
             print("Evaluating")
             test_data = test_split.to_tensor(device=device)
-            probs, attns = evaluate_probe(probe, test_data, config, compute_attn=True)
-            entropy = -(attns * np.log(np.maximum(attns, 1e-10))).sum(axis=1).mean()
-            numbers_of_elements = (attns > 0).sum(axis=1)
-            entropies = -np.log(1 / numbers_of_elements)
-            entropy_baseline = entropies.mean()
-            print(f"Entropy: {entropy:.2f} (Baseline: {entropy_baseline:.2f})")
-            metrics['entropy'].append(float(entropy))
-            metrics['entropy_baseline'].append(float(entropy_baseline))
+            
+            # Handle different probe types
+            if config.train_skyline:
+                # SkylineProbe doesn't compute attention probabilities
+                probs = evaluate_probe(probe, test_data, config, compute_attn=False)
+                # Set default values for attention-related metrics
+                entropy = 0.0
+                entropy_baseline = 0.0
+                metrics['entropy'].append(float(entropy))
+                metrics['entropy_baseline'].append(float(entropy_baseline))
+                # Skip HTML generation for skyline probes
+                htmls.append("SkylineProbe - no attention visualization available")
+            else:
+                # Regular attention probe
+                probs, attns = evaluate_probe(probe, test_data, config, compute_attn=True)
+                entropy = -(attns * np.log(np.maximum(attns, 1e-10))).sum(axis=1).mean()
+                numbers_of_elements = (attns > 0).sum(axis=1)
+                entropies = -np.log(1 / numbers_of_elements)
+                entropy_baseline = entropies.mean()
+                print(f"Entropy: {entropy:.2f} (Baseline: {entropy_baseline:.2f})")
+                metrics['entropy'].append(float(entropy))
+                metrics['entropy_baseline'].append(float(entropy_baseline))
 
-            for i in np.random.randint(0, len(attns), 15):
-                input_id, attn, label = test_data.input_ids[i], attns[i], test_data.text_label(test_data.y[i])
-                html = []
-                for i, (token_id, a) in enumerate(zip(input_id, attn)):
-                    if token_id == tokenizer.eos_token_id or token_id == tokenizer.pad_token_id:
-                        continue
-                    a = float(a[0])
-                    s, f = 0.2, 0.9
-                    a = min(1, s + f * a)
-                    html.append(f"<span style='color: rgba(1, 0, 0, {a:.2f})'>{tokenizer.decode(token_id)}</span>")
-                html = f"<div style='background-color: white; padding: 10px; color: black'>Class: {label} " + "".join(html) + "</div>"
-                if args.display_now:
-                    from IPython.display import display, HTML
-                    display(HTML(html))
-                htmls.append(html)
+                for i in np.random.randint(0, len(attns), 15):
+                    input_id, attn, label = test_data.input_ids[i], attns[i], test_data.text_label(test_data.y[i])
+                    html = []
+                    for i, (token_id, a) in enumerate(zip(input_id, attn)):
+                        if token_id == tokenizer.eos_token_id or token_id == tokenizer.pad_token_id:
+                            continue
+                        a = float(a[0])
+                        s, f = 0.2, 0.9
+                        a = min(1, s + f * a)
+                        html.append(f"<span style='color: rgba(1, 0, 0, {a:.2f})'>{tokenizer.decode(token_id)}</span>")
+                    html = f"<div style='background-color: white; padding: 10px; color: black'>Class: {label} " + "".join(html) + "</div>"
+                    if args.display_now:
+                        from IPython.display import display, HTML
+                        display(HTML(html))
+                    htmls.append(html)
         
             if test_data.multi_class:
                 accuracy = accuracy_score(test_split.y, probs.argmax(axis=-1))

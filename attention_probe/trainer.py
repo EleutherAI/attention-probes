@@ -3,6 +3,7 @@ from collections import OrderedDict
 import torch
 
 from .attention_probe import AttentionProbe
+from .skyline_probe import SkylineProbe
 from .linear_classifier import Classifier as LinearClassifier
 from torch.nn import functional as F
 from jaxtyping import Float, Int, Bool, Array
@@ -37,6 +38,8 @@ class AttentionProbeTrainConfig(Serializable):
     """Use a linear classifier instead of an attention probe.
     Trained with cross-validation for tuning weight decay. Uses LBFGS.
     Only use with one-token datasets."""
+    train_skyline: bool = False
+    """Train a transformer instead of an attention probe."""
     
     last_only: bool = False
     """Transforms the data such that only the last token is used.
@@ -212,9 +215,17 @@ def attention_probe_from_config(config: MulticlassTrainConfig, train_split: Trai
     return probe
 
 
-def train_probe_iteration(train_split: TrainingData, config: MulticlassTrainConfig, device: torch.device, start_from: AttentionProbe | None = None) -> tuple[AttentionProbe, float]:
+def train_probe_iteration(train_split: TrainingData, config: MulticlassTrainConfig, device: torch.device, start_from: AttentionProbe | SkylineProbe | None = None) -> tuple[AttentionProbe | SkylineProbe, float]:
     train_split = train_split.trim()
-    probe = attention_probe_from_config(config, train_split)
+    if config.train_skyline:
+        probe = SkylineProbe(
+            train_split.x.shape[-1],
+            config.n_heads,
+            output_dim=1 if not train_split.multi_class else train_split.n_classes,
+            config=config,
+        )
+    else:
+        probe = attention_probe_from_config(config, train_split)
     if start_from is not None:
         probe.load_state_dict(start_from.state_dict())
         torch.nn.init.normal_(probe.q.weight.data, mean=0.0, std=0.01)
@@ -277,7 +288,7 @@ def train_probe_iteration(train_split: TrainingData, config: MulticlassTrainConf
                     break
     return probe, loss.item()
 
-def train_probe(train_split: TrainingData, config: MulticlassTrainConfig, device: torch.device):
+def train_probe(train_split: TrainingData, config: MulticlassTrainConfig, device: torch.device) -> AttentionProbe | SkylineProbe:
     train_split_original = train_split
     train_split = train_split.process(config)
     if config.use_linear_classifier:
@@ -304,7 +315,7 @@ def train_probe(train_split: TrainingData, config: MulticlassTrainConfig, device
     if loss > config.retrain_threshold and config.retrain_n > 0:
         del probe, loss
         return train_probe(train_split, replace(config, retrain_n=config.retrain_n - 1, seed=config.seed + 1), device)
-    if config.ensemble_mean:
+    if config.ensemble_mean and not config.train_skyline:
         train_predictions = evaluate_probe(probe, train_split, config)
         mean_config = replace(config, train_lbfgs=True, take_mean=True)
         train_predictions = torch.from_numpy(train_predictions).to(device)
@@ -316,9 +327,14 @@ def train_probe(train_split: TrainingData, config: MulticlassTrainConfig, device
         probe.n_heads += mean_probe.n_heads
     return probe
 
-def evaluate_probe(probe: AttentionProbe, test_data: TrainingData, config: MulticlassTrainConfig, compute_attn: bool = False, use_activation: bool = False) -> \
+def evaluate_probe(probe: AttentionProbe | SkylineProbe, test_data: TrainingData, config: MulticlassTrainConfig, compute_attn: bool = False, use_activation: bool = False) -> \
     tuple[Float[Array, "batch_size n_heads seq_len"], Float[Array, "batch_size n_classes"]] | Float[Array, "batch_size n_classes"]:
     device = next(probe.parameters()).device
+    
+    # Disable attention computation for SkylineProbe
+    if isinstance(probe, SkylineProbe):
+        compute_attn = False
+    
     with torch.inference_mode(), torch.autocast(device_type=device.type):
         attns = []
         all_probs = []
@@ -336,7 +352,8 @@ def evaluate_probe(probe: AttentionProbe, test_data: TrainingData, config: Multi
                     out = out.softmax(dim=-1)
             probs = out.detach().cpu().numpy()
             all_probs.append(probs)
-        probe.attn_hook._foward_hooks = OrderedDict()
+        if hasattr(probe, 'attn_hook'):
+            probe.attn_hook._foward_hooks = OrderedDict()
         if compute_attn:
             attns = np.concatenate(attns)
         probs = np.concatenate(all_probs)
