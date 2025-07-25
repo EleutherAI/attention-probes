@@ -154,6 +154,18 @@ class TrainingData:
             yield self.reindex(train_indices), self.reindex(test_indices)
     
     @torch.no_grad()
+    def join(self, other: "TrainingData") -> "TrainingData":
+        return replace(
+            self,
+            x=torch.cat([self.x, other.x], dim=0),
+            mask=torch.cat([self.mask, other.mask], dim=0),
+            position=torch.cat([self.position, other.position], dim=0),
+            y=torch.cat([self.y, other.y], dim=0),
+            y_addition=torch.cat([self.y_addition, other.y_addition], dim=0) if self.y_addition is not None else None,
+            input_ids=torch.cat([self.input_ids, other.input_ids], dim=0),
+        )
+    
+    @torch.no_grad()
     def to_tensor(self, device: torch.device = None) -> "TrainingData":
         if self.is_tensor:
             return replace(
@@ -215,7 +227,7 @@ def attention_probe_from_config(config: MulticlassTrainConfig, train_split: Trai
     return probe
 
 
-def train_probe_iteration(train_split: TrainingData, config: MulticlassTrainConfig, device: torch.device, start_from: AttentionProbe | SkylineProbe | None = None) -> tuple[AttentionProbe | SkylineProbe, float]:
+def train_probe(train_split: TrainingData, config: MulticlassTrainConfig, device: torch.device, start_from: AttentionProbe | SkylineProbe | None = None) -> tuple[AttentionProbe | SkylineProbe, float]:
     train_split = train_split.trim()
     if config.train_skyline:
         probe = SkylineProbe(
@@ -224,6 +236,7 @@ def train_probe_iteration(train_split: TrainingData, config: MulticlassTrainConf
             output_dim=1 if not train_split.multi_class else train_split.n_classes,
             config=config,
         )
+        probe.compile()
     else:
         probe = attention_probe_from_config(config, train_split)
     if start_from is not None:
@@ -288,7 +301,8 @@ def train_probe_iteration(train_split: TrainingData, config: MulticlassTrainConf
                     break
     return probe, loss.item()
 
-def train_probe(train_split: TrainingData, config: MulticlassTrainConfig, device: torch.device) -> AttentionProbe | SkylineProbe:
+@torch.enable_grad()
+def train_probe_repeatedly(train_split: TrainingData, config: MulticlassTrainConfig, device: torch.device | None = None) -> AttentionProbe | SkylineProbe:
     train_split_original = train_split
     train_split = train_split.process(config)
     if config.use_linear_classifier:
@@ -308,19 +322,20 @@ def train_probe(train_split: TrainingData, config: MulticlassTrainConfig, device
     
     probe_start = None
     if config.finetune_attn:
-        probe_start, _ = train_probe_iteration(train_split, config, device)
+        probe_start, _ = train_probe(train_split, config, device)
         config = replace(config, train_lbfgs=False).not_one_token()
         train_split = train_split_original.process(config)
-    probe, loss = train_probe_iteration(train_split, config, device, start_from=probe_start)
+    probe, loss = train_probe(train_split, config, device, start_from=probe_start)
     if loss > config.retrain_threshold and config.retrain_n > 0:
+        print("Training probe failed, retraining")
         del probe, loss
-        return train_probe(train_split, replace(config, retrain_n=config.retrain_n - 1, seed=config.seed + 1), device)
+        return train_probe_repeatedly(train_split, replace(config, retrain_n=config.retrain_n - 1, seed=config.seed + 1), device)
     if config.ensemble_mean and not config.train_skyline:
         train_predictions = evaluate_probe(probe, train_split, config)
         mean_config = replace(config, train_lbfgs=True, take_mean=True)
         train_predictions = torch.from_numpy(train_predictions).to(device)
         train_split = replace(train_split.process(mean_config), y_addition=train_predictions)
-        mean_probe, _ = train_probe_iteration(train_split, mean_config, device)
+        mean_probe, _ = train_probe(train_split, mean_config, device)
         mean_probe_sd = mean_probe.state_dict()
         for name, param in probe.named_parameters():
             param.data = torch.cat([param.data, mean_probe_sd[name].data], dim=0)
@@ -329,6 +344,10 @@ def train_probe(train_split: TrainingData, config: MulticlassTrainConfig, device
 
 def evaluate_probe(probe: AttentionProbe | SkylineProbe, test_data: TrainingData, config: MulticlassTrainConfig, compute_attn: bool = False, use_activation: bool = False) -> \
     tuple[Float[Array, "batch_size n_heads seq_len"], Float[Array, "batch_size n_classes"]] | Float[Array, "batch_size n_classes"]:
+    
+    probe.eval()
+    probe.requires_grad_(False)
+    
     device = next(probe.parameters()).device
     
     # Disable attention computation for SkylineProbe

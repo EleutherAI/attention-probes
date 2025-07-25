@@ -1,25 +1,45 @@
 [project]
-name = "mosaic"
+name = "attention-probes"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "google-re2>=1.1.20240702",
     "gradio>=5.33.0",
     "jax>=0.5.3",
     "jaxtyping>=0.3.2",
     "joblib>=1.5.0",
     "loguru>=0.7.3",
     "numba>=0.61.2",
+    "nvidia-cuda-cupti-cu12>=12.0",
+    "nvidia-cudnn-cu12>=9.0",
+    "nvidia-cusparselt-cu12>=0.6.0",
     "ruff>=0.11.12",
     "sae-lens",
     "scikit-learn>=1.6.1",
     "spacy>=3.8.5",
     "spacy-alignments>=0.9.1",
     "sparqlwrapper>=2.0.0",
-    "torch>=2.7.0",
+    "torch",
+    "triton",
+    "simple_parsing",
+    "nvidia-ml-py3>=7.352.0",
 ]
 
+[[tool.uv.index]]
+name = "pytorch"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
+[tool.uv]
+prerelease = "allow"
 [tool.uv.sources]
+torch = [
+    { index = "pytorch" },
+]
+triton = [
+    { index = "pytorch" }
+]
+torchao = [
+    { index = "pytorch" }
+]
 sae-lens = { git = "https://github.com/jbloomAus/SAELens" }

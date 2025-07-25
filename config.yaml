@@ -7,7 +7,7 @@ settings:
   test_size: 0.4
   tree_depth: 5
   act_only: True
-  cuda_visible_devices: "1,6,7"
+  cuda_visible_devices: "0,3,6,7"
   bow_baseline: "True"
 
 models:

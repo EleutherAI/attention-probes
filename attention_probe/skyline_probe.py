@@ -180,10 +180,10 @@ class SkylineProbe(nn.Module):
         super().__init__()
         
         self.d_model = d_in
-        self.d_ff = 2 * self.d_model  # 2x width for MLP as requested
+        self.d_ff = self.d_model
         self.n_heads = n_heads
         self.output_dim = output_dim
-        self.n_layers = 3  # 3 layers as requested
+        self.n_layers = 2
         
         # Transformer blocks
         self.transformer_blocks = nn.ModuleList([
