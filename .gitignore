@@ -34,3 +34,4 @@ src_mosaic/per_run_results/pminervini_nq_swap_openai_google_gemma_2_9b_it_questi
 output_haystack/
 *.egg-info/
 plots/
+all_activations.html

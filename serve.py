@@ -1,31 +1,34 @@
 from pathlib import Path
 import json
 import gradio as gr
+import os
 
 def get_available_runs(config):
     cache_dir = Path("cache")
     runs = []
     for run in (cache_dir / config).glob("*"):
-        html_path = run / "htmls.json"
+        html_path = run / "activations.html"
         if html_path.exists():
             runs.append(run.stem)
     return sorted(runs)
 
-def load_htmls(config, run_name):
+def load_html(config, run_name):
     cache_dir = Path("cache")
-    html_path = cache_dir / config / run_name / "htmls.json"
+    if run_name is None:
+        return None
+    html_path = cache_dir / config / run_name / "activations.html"
     if not html_path.exists():
         return None
-    return json.load(open(html_path))
+    return html_path.read_text()
 
 def show_htmls(config, run_name):
-    htmls = load_htmls(config, run_name)
-    if htmls is None:
-        return "No htmls found for this run"
+    html = load_html(config, run_name)
+    if html is None:
+        return "No visualization found for this run"
     
-    html_output = [f"<h1>{run_name}</h1>"]
-    html_output.extend(htmls)
-    return "\n".join(html_output)
+    html = "<br>".join(html.split("<br>")[:100])
+    
+    return f"<h1>{run_name}</h1>\n{html}"
 
 def update_runs(config):
     runs = get_available_runs(config)
@@ -33,13 +36,13 @@ def update_runs(config):
         return gr.Dropdown(choices=[], value=None)
     return gr.Dropdown(choices=runs, value=runs[0])
 
-configs = ["v1", "v1-tanh"] # Add other configs as needed
-with gr.Blocks(title="Attention Probe Visualization") as interface:
+configs = [c for c in os.listdir("cache") if c.endswith("-0") and "attn-1" in c]
+with gr.Blocks(title="Attention Probe Visualization") as demo:
     gr.Markdown("# Attention Probe Visualization")
     gr.Markdown("View attention probe results for different configurations and runs")
     
-    config_dropdown = gr.Dropdown(choices=configs, value="v1", label="Configuration")
-    run_dropdown = gr.Dropdown(choices=get_available_runs("v1"), value=None, label="Run")
+    config_dropdown = gr.Dropdown(choices=configs, value=configs[0], label="Configuration")
+    run_dropdown = gr.Dropdown(choices=get_available_runs(configs[0]), value=None, label="Run")
     output = gr.HTML()
     
     config_dropdown.change(
@@ -55,4 +58,4 @@ with gr.Blocks(title="Attention Probe Visualization") as interface:
     )
 
 if __name__ == "__main__":
-    interface.launch(share=True)
+    demo.launch(share=True)
