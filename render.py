@@ -1,13 +1,21 @@
 
 from pathlib import Path
 import argparse
-import html
+from natsort import natsorted
 
 # Configuration for the aggregation
 CACHE_DIR = Path("cache")
 DEFAULT_OUTPUT = Path("plots/all_activations.html")
 TRIM_LINES = 100  # How many <br>-separated lines to keep from each activations.html
-
+dataset_descriptions = {
+    "Anthropic_election_questions": "<a href='https://huggingface.co/datasets/Anthropic/election_questions' target='_blank'>Election Questions</a>",
+    "fancyzhx_ag_news": "<a href='https://huggingface.co/datasets/fancyzhx/ag_news' target='_blank'>AG News</a>",
+    "jackhhao_jailbreak-classification": "<a href='https://huggingface.co/datasets/jackhhao/jailbreak-classification' target='_blank'>Jailbreak Classification</a>",
+    "willcb_massive-scenario": "<a href='https://huggingface.co/datasets/willcb/massive-scenario' target='_blank'>Massive Scenario</a>",
+    "canrager_amazon_reviews_mcauley_1and5": "<a href='https://huggingface.co/datasets/canrager/amazon_reviews_mcauley_1and5' target='_blank'>Amazon Reviews</a>",
+    "LabHC_bias_in_bios": "<a href='https://huggingface.co/datasets/LabHC/bias_in_bios' target='_blank'>Bias in Bios</a>",
+    "AIM-Harvard_reject_prompts": "<a href='https://huggingface.co/datasets/AIM-Harvard/reject_prompts' target='_blank'>Reject Prompts</a>",
+}
 
 def get_configs():
     """Return a sorted list of configuration directory names matching the pattern used in serve.py."""
@@ -65,18 +73,45 @@ def build_html(output_path: Path = DEFAULT_OUTPUT):
     ]
 
     for config in configs:
-        html_sections.append(f"<h2>Configuration: {html.escape(config)}</h2>")
+        # html_sections.append(f"<h2>Configuration: {html.escape(config)}</h2>")
         runs = get_runs(config)
         if not runs:
             html_sections.append("<p><em>No runs with activations found.</em></p>")
             continue
 
+        names, htmls = [], []
+
         for run in runs:
+            if run.startswith("google-gemma-2b-"):
+                model_name = "Gemma 2B"
+            elif run.startswith("google-gemma-2-2b-"):
+                model_name = "Gemma 2 2B"
+            # hack
+            layer_idx = int(run.partition("2b-")[2].partition("-")[0])
+            
+            haystack = False
+            dataset_name = None
+            if "gurnee_data" in run:
+                haystack = True
+                dataset_name = run.partition("._data_gurnee_data_processed_")[2]
+            else:
+                haystack = False
+                dataset_name = run.partition("-16k-")[2]
+            
             trimmed_html = load_trimmed_html(config, run)
+            descriptives = [
+                f"Dataset: {'(Neurons in A Haystack) ' if haystack else ''}{dataset_descriptions.get(dataset_name, dataset_name)}",
+                f"Model: {model_name}",
+                f"Layer: {layer_idx}",
+            ]
+            name = ", ".join(descriptives)
+            names.append(name)
+            htmls.append(trimmed_html)
+        for name, html in natsorted(zip(names, htmls)):
             # Use <details> for collapsible runs
             html_sections.append("<details>")
-            html_sections.append(f"<summary>Run: {html.escape(run)}</summary>")
-            html_sections.append(trimmed_html)
+            html_sections.append(f"<summary>{name}</summary>")
+            html_sections.append(html)
             html_sections.append("</details>")
 
     html_sections.extend(["</body>", "</html>"])
