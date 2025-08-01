@@ -1,6 +1,20 @@
 from .attention_probe import AttentionProbe
-from .skyline_probe import SkylineProbe
+from .trainer import (
+    AttentionProbeTrainConfig,
+    TrainingData,
+    train_probe,
+    evaluate_probe,
+    compute_metrics,
+)
 from .linear_classifier import Classifier as LinearClassifier
 
 
-__all__ = ["AttentionProbe", "SkylineProbe", "LinearClassifier"]
+__all__ = [
+    "AttentionProbe",
+    "LinearClassifier",
+    "AttentionProbeTrainConfig",
+    "TrainingData",
+    "train_probe",
+    "evaluate_probe",
+    "compute_metrics",
+]

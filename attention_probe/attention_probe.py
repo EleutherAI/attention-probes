@@ -3,7 +3,28 @@ import torch
 from typing import Any
 
 class AttentionProbe(nn.Module):
+    """
+    Torch module for attention probes.
+    Supports:
+    * multiple heads
+    * relative position bias
+    * post-attention MLP
+    * attention weight dropout
+    * attention weight recording via PyTorch forward hooks
+    """
+    
     def __init__(self, d_in, n_heads, output_dim: int = 1, hidden_dim: int = 0, use_tanh: bool = False, attn_dropout_p: float = 0.0, config: Any = None):
+        """
+        Args:
+            d_in (int): input dimensionality
+            n_heads (int): number of attention heads
+            output_dim (int): output dimension (default: 1).
+            Returns logits, needs to be passed through an activation function.
+            hidden_dim (int): hidden dimension for post-attention MLP (default: 0, no MLP)
+            use_tanh (bool): use tanh activation for attention weights (default: False)
+            attn_dropout_p (float): dropout probability for attention weights (default: 0.0)
+            config (Any): additional configuration parameters to store in the model
+        """
         super().__init__()
         # projection from inputs to attention logits
         self.q = nn.Linear(d_in, n_heads, bias=False)

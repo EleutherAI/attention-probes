@@ -1,9 +1,14 @@
+"""
+Default trainer for attention probes.
+Takes in a dataset of hidden states and labels, and trains an attention probe with AdamW or LBFGS.
+Can be used to train a linear classifier on mean-pooled or last-token hidden states instead of an attention probe.
+"""
+
 from typing import Optional
 from collections import OrderedDict
 import torch
 
 from .attention_probe import AttentionProbe
-from .skyline_probe import SkylineProbe
 from .linear_classifier import Classifier as LinearClassifier
 from torch.nn import functional as F
 from jaxtyping import Float, Int, Bool, Array
@@ -12,6 +17,8 @@ from sklearn.model_selection import StratifiedKFold
 import numpy as np
 from simple_parsing import Serializable
 from dataclasses import dataclass, replace
+from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
+import warnings
 
 
 @dataclass
@@ -38,8 +45,6 @@ class AttentionProbeTrainConfig(Serializable):
     """Use a linear classifier instead of an attention probe.
     Trained with cross-validation for tuning weight decay. Uses LBFGS.
     Only use with one-token datasets."""
-    train_skyline: bool = False
-    """Train a transformer instead of an attention probe."""
     
     last_only: bool = False
     """Transforms the data such that only the last token is used.
@@ -82,43 +87,65 @@ class AttentionProbeTrainConfig(Serializable):
         return replace(self, last_only=False, take_mean=False, absmax_pool=False)
 
 @dataclass
-class MulticlassTrainConfig(AttentionProbeTrainConfig):
-    n_folds: int = 5
-
-@dataclass
 class TrainingData:
+    """
+    Helper for storing all data relevant to training an attention probe.
+    """
+    
     x: Float[Array, "batch_size seq_len hidden_dim"]
+    """Hidden states."""
     mask: Bool[Array, "batch_size seq_len"]
+    """Mask of valid positions."""
     position: Int[Array, "batch_size seq_len"]
+    """Position of each token."""
     y: Int[Array, "batch_size"]
-    input_ids: Int[Array, "batch_size seq_len"]
-    n_classes: int
+    """Labels."""
+    input_ids: Int[Array, "batch_size seq_len"] | None = None
+    """Original input IDs."""
+    n_classes: int = 2
+    """Number of classes."""
     class_mapping: dict[int, str] | None = None
+    """Mapping from class indices to class names."""
     y_addition: Optional[Float[Array, "batch_size n_classes"]] = None
+    """Additional labels to add to the probe output."""
     
     @property
     def multi_class(self) -> bool:
+        """Whether the dataset is a multiclass dataset."""
         return self.n_classes > 2
     
     def text_label(self, y: int) -> str:
+        """Get the text label for a class index."""
         if self.class_mapping is None:
             return str(y)
         return self.class_mapping[y]
     
     @property
     def device(self) -> torch.device:
+        """Device of the data."""
         return self.x.device
+    
+    def __post_init__(self):
+        if self.input_ids is not None and self.input_ids.ndim == 1:
+            self.input_ids = self.input_ids[None].repeat(len(self.x), 1)
+        if self.position is not None and self.position.ndim == 1:
+            self.position = self.position[None].repeat(len(self.x), 1)
+        
 
     def __len__(self) -> int:
+        """Number of samples in the dataset."""
         return len(self.x)
     
     def numel(self) -> int:
+        """Number of valid positions in the dataset."""
         return int(self.mask.sum())
     
     def numel_base(self) -> int:
-        return self.input_ids.numel()
+        """Number of tokens in the dataset."""
+        return self.input_ids.numel() if self.input_ids is not None else 0
     
     def trim(self) -> "TrainingData":
+        """Trim the dataset to the last valid position."""
         last_position = self.mask.any(dim=0).nonzero().tolist()[-1][-1] + 1
         return replace(
             self,
@@ -126,10 +153,11 @@ class TrainingData:
             mask=self.mask[:, :last_position],
             position=self.position[:, :last_position],
             y=self.y[:, :last_position] if self.y.ndim > 1 else self.y,
-            input_ids=self.input_ids[:, :last_position],
+            input_ids=self.input_ids[:, :last_position] if self.input_ids is not None else None,
         )
     @torch.no_grad()
     def reindex(self, indices: Int[Array, "batch_size"]) -> "TrainingData":
+        """Reindex the dataset according to an array of indices corresponding to original examples."""
         assert indices.ndim == 1
         assert int(max(indices)) < len(self)
         if self.is_tensor and isinstance(indices, np.ndarray):
@@ -143,11 +171,12 @@ class TrainingData:
             position=self.position[indices],
             y=self.y[indices],
             y_addition=self.y_addition[indices] if self.y_addition is not None else None,
-            input_ids=self.input_ids[indices],
+            input_ids=self.input_ids[indices] if self.input_ids is not None else None,
         )
     
     @torch.no_grad()
     def split(self, n_folds: int, seed: int) -> list[tuple["TrainingData", "TrainingData"]]:
+        """Split the dataset into training and testing sets."""
         kfold = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=seed)
         splits = list(kfold.split(self.y, self.y))
         for train_indices, test_indices in splits:
@@ -155,6 +184,7 @@ class TrainingData:
     
     @torch.no_grad()
     def join(self, other: "TrainingData") -> "TrainingData":
+        """Join two datasets, concatenating all fields."""
         return replace(
             self,
             x=torch.cat([self.x, other.x], dim=0),
@@ -162,11 +192,12 @@ class TrainingData:
             position=torch.cat([self.position, other.position], dim=0),
             y=torch.cat([self.y, other.y], dim=0),
             y_addition=torch.cat([self.y_addition, other.y_addition], dim=0) if self.y_addition is not None else None,
-            input_ids=torch.cat([self.input_ids, other.input_ids], dim=0),
+            input_ids=torch.cat([self.input_ids, other.input_ids], dim=0) if self.input_ids is not None else None,
         )
     
     @torch.no_grad()
     def to_tensor(self, device: torch.device = None) -> "TrainingData":
+        """Place the dataset on a device. If the dataset is in numpy format, convert it to a tensor."""
         if self.is_tensor:
             return replace(
                 self,
@@ -175,7 +206,7 @@ class TrainingData:
                 position=self.position.to(device),
                 y=self.y.to(device),
                 y_addition=self.y_addition.to(device) if self.y_addition is not None else None,
-                input_ids=self.input_ids.to(device),
+                input_ids=self.input_ids.to(device) if self.input_ids is not None else None,
             )
         return replace(
             self,
@@ -184,15 +215,22 @@ class TrainingData:
             position=torch.tensor(self.position, dtype=torch.int32, device=device),
             y=torch.tensor(self.y, dtype=torch.int32, device=device),
             y_addition=torch.tensor(self.y_addition, dtype=torch.float32, device=device) if self.y_addition is not None else None,
-            input_ids=torch.tensor(self.input_ids, dtype=torch.int32, device=device),
+            input_ids=torch.tensor(self.input_ids, dtype=torch.int32, device=device) if self.input_ids is not None else None,
         )
     
     @property
     def is_tensor(self) -> bool:
+        """Whether the dataset is a tensor."""
         return isinstance(self.x, torch.Tensor)
     
     @torch.no_grad()
-    def process(self, config: MulticlassTrainConfig) -> "TrainingData":
+    def process(self, config: AttentionProbeTrainConfig) -> "TrainingData":
+        """
+        Process the training data according to the configuration.
+        If mean pooling or last token selection is enabled, these transformations are applied irreversibly.
+        Will convert the dataset to a tensor if it is not already.
+        """
+
         if not self.is_tensor:
             self = self.to_tensor(device="cpu")
         
@@ -210,7 +248,11 @@ class TrainingData:
         return self
 
 
-def attention_probe_from_config(config: MulticlassTrainConfig, train_split: TrainingData) -> AttentionProbe:
+def attention_probe_from_config(config: AttentionProbeTrainConfig, train_split: TrainingData) -> AttentionProbe:
+    """
+    Create an attention probe from a configuration and training data.
+    """
+
     if config.one_token:
         config = replace(config, attn_dropout_p=0.0)
     probe = AttentionProbe(
@@ -227,18 +269,22 @@ def attention_probe_from_config(config: MulticlassTrainConfig, train_split: Trai
     return probe
 
 
-def train_probe(train_split: TrainingData, config: MulticlassTrainConfig, device: torch.device, start_from: AttentionProbe | SkylineProbe | None = None) -> tuple[AttentionProbe | SkylineProbe, float]:
+def train_probe(train_split: TrainingData, config: AttentionProbeTrainConfig, device: torch.device | None = None, start_from: AttentionProbe | None = None) -> tuple[AttentionProbe, float]:
+    """
+    Train an attention probe.
+    
+    Args:
+        train_split: The training data.
+        config: The configuration for the probe.
+        device: The device to use for training.
+        start_from: A pre-trained probe to start from. If None, a new probe is trained from scratch.
+
+    Returns:
+        The trained probe and the loss.
+    """
+
     train_split = train_split.trim()
-    if config.train_skyline:
-        probe = SkylineProbe(
-            train_split.x.shape[-1],
-            config.n_heads,
-            output_dim=1 if not train_split.multi_class else train_split.n_classes,
-            config=config,
-        )
-        probe.compile()
-    else:
-        probe = attention_probe_from_config(config, train_split)
+    probe = attention_probe_from_config(config, train_split)
     if start_from is not None:
         probe.load_state_dict(start_from.state_dict())
         torch.nn.init.normal_(probe.q.weight.data, mean=0.0, std=0.01)
@@ -302,7 +348,21 @@ def train_probe(train_split: TrainingData, config: MulticlassTrainConfig, device
     return probe, loss.item()
 
 @torch.enable_grad()
-def train_probe_repeatedly(train_split: TrainingData, config: MulticlassTrainConfig, device: torch.device | None = None) -> AttentionProbe | SkylineProbe:
+def train_probe_repeatedly(train_split: TrainingData, config: AttentionProbeTrainConfig, device: torch.device | None = None) -> AttentionProbe:
+    """
+    Train an attention probe repeatedly until it converges or reaches the maximum number of retrains,
+    as specified by the `retrain_threshold` and `retrain_n` parameters in the config. Not necessary with
+    the default config, may be useful for debugging.
+    
+    Args:
+        train_split: The training data.
+        config: The configuration for the probe.
+        device: The device to use for training.
+
+    Returns:
+        The trained probe.
+    """
+
     train_split_original = train_split
     train_split = train_split.process(config)
     if config.use_linear_classifier:
@@ -330,7 +390,7 @@ def train_probe_repeatedly(train_split: TrainingData, config: MulticlassTrainCon
         print("Training probe failed, retraining")
         del probe, loss
         return train_probe_repeatedly(train_split, replace(config, retrain_n=config.retrain_n - 1, seed=config.seed + 1), device)
-    if config.ensemble_mean and not config.train_skyline:
+    if config.ensemble_mean:
         train_predictions = evaluate_probe(probe, train_split, config)
         mean_config = replace(config, train_lbfgs=True, take_mean=True)
         train_predictions = torch.from_numpy(train_predictions).to(device)
@@ -342,17 +402,27 @@ def train_probe_repeatedly(train_split: TrainingData, config: MulticlassTrainCon
         probe.n_heads += mean_probe.n_heads
     return probe
 
-def evaluate_probe(probe: AttentionProbe | SkylineProbe, test_data: TrainingData, config: MulticlassTrainConfig, compute_attn: bool = False, use_activation: bool = False) -> \
+def evaluate_probe(probe: AttentionProbe, test_data: TrainingData, config: AttentionProbeTrainConfig, compute_attn: bool = False, use_activation: bool = False) -> \
     tuple[Float[Array, "batch_size n_heads seq_len"], Float[Array, "batch_size n_classes"]] | Float[Array, "batch_size n_classes"]:
+    """
+    Evaluate an attention probe on a dataset. Optionally, collect attention weights.
     
+    Args:
+        probe: The attention probe to evaluate.
+        test_data: The dataset to evaluate the probe on.
+        config: The configuration for the probe.
+        compute_attn: Whether to collect attention weights.
+        use_activation: Whether to use an activation function on the probe output.
+
+    Returns:
+        If `compute_attn` is False, returns the probe output.
+        If `compute_attn` is True, returns a tuple of the probe output and the attention weights.
+    """
+
     probe.eval()
     probe.requires_grad_(False)
     
     device = next(probe.parameters()).device
-    
-    # Disable attention computation for SkylineProbe
-    if isinstance(probe, SkylineProbe):
-        compute_attn = False
     
     with torch.inference_mode(), torch.autocast(device_type=device.type):
         attns = []
@@ -379,3 +449,33 @@ def evaluate_probe(probe: AttentionProbe | SkylineProbe, test_data: TrainingData
     if compute_attn:
         return probs, attns
     return probs
+
+
+def compute_metrics(probs: Float[Array, "batch_size n_classes"], data: TrainingData) -> dict[str, float]:
+    """
+    Compute accuracy and other metrics given a dataset with labels and a probe's predictions.
+    
+    Args:
+        probs: Predictions of the probe.
+        data: Dataset with labels.
+
+    Returns:
+        Dictionary of metrics (accuracy, f1/roc_auc if binary classification).
+    """
+    
+    metrics = {}
+    if data.multi_class:
+        accuracy = accuracy_score(data.y, probs.argmax(axis=-1))
+    else:
+        accuracy = accuracy_score(data.y, probs > 0.5)
+        f1 = f1_score(data.y, probs > 0.5)
+        metrics['f1'] = f1
+    metrics['accuracy'] = accuracy
+    if not data.multi_class:
+        try:
+            roc_auc = roc_auc_score(data.y, probs)
+        except ValueError:
+            warnings.warn("ROC AUC produced an error")
+            roc_auc = 0
+        metrics['roc_auc'] = roc_auc
+    return metrics

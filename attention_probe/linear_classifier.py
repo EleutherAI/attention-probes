@@ -1,3 +1,8 @@
+"""
+LBFGs-based trainer for linear classifiers.
+Copied from https://github.com/EleutherAI/ccs/blob/main/ccs/training/classifier.py
+"""
+
 from dataclasses import dataclass, field
 
 import torch
