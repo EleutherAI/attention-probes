@@ -14,7 +14,7 @@ src_mosaic/run_zip.sh
 .env
 *.eval
 output/activations/
-/cache
+/cache*
 *.pyc
 .venv
 output/classifications/google_paligemma2-3b-pt-224/

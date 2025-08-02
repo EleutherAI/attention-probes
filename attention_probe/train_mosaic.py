@@ -202,7 +202,7 @@ if __name__ == "__main__":
             generator = np.random.default_rng(config.seed)
             training_data = training_data.reindex(generator.permutation(len(training_data))[:config.batch_size])
         try:
-            next(iter(training_data.split(config.n_folds, config.seed)))
+            next(iter(training_data.split(args.n_folds, config.seed)))
         except ValueError:
             print("Warning: Not enough data to split")
             skip()
@@ -210,7 +210,7 @@ if __name__ == "__main__":
 
         highest_accuracy, best_config = 0, None
         for weight_decay in args.sweep_weight_decay:
-            splits = training_data.split(config.n_folds, config.seed)
+            splits = training_data.split(args.n_folds, config.seed)
             sweep_config = replace(config, weight_decay=weight_decay)
             val_metrics = defaultdict(list)
             for i, (train_split, test_split) in enumerate(splits):
